@@ -1,42 +1,74 @@
-import struct
 from typing import *
+import struct
 import asyncio
 import socket
 import ipaddress as ipa
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='{%(asctime)s} [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S'
+)
+
+logger = logging.getLogger(__name__)
 
 
 class Socks5Server:
     def __init__(self,
                  host: str = '127.0.0.1', port: int = 1080,
-                 user_commands: Dict[bytes, callable] = {}, users: Dict[str, str] = {}, accept_anonymous: bool = False):
+                 user_white_list: Optional[Set[str]] = None,
+                 users_black_list: Optional[Set[str]] = None,
+                 user_commands: Optional[Dict[bytes, callable]] = None,
+                 users: Optional[Dict[str, str]] = None,
+                 accept_anonymous: bool = False):
 
         self.socks_version = 5
         self.accept_anonymous = accept_anonymous
-        self.users = users
+        self.users = users if not users is None else {}
         self.host = host
         self.port = port
+        self.user_white_list = user_white_list
+        self.users_black_list = users_black_list
 
         self.user_commands_default = {
             0x01: ConnectionMethods.tcp_connection,
             0x03: ConnectionMethods.bind_socket,
             0x04: ConnectionMethods.udp_connection,
         }
-        self.user_commands = user_commands if not user_commands == {} else self.user_commands_default
+        self.user_commands = {} if user_commands is None else self.user_commands_default
         self.asyncio_server = None
 
-    async def start(self):
-        self.asyncio_server = await asyncio.start_server(self.handle_client, self.host, self.port)
-        print(f"[+] SOCKS5 proxy running on {self.host}:{self.port}")
-        async with self.asyncio_server:
-            await self.asyncio_server.serve_forever()
+    async def async_start(self):
+        try:
+            self.asyncio_server = await asyncio.start_server(self.handle_client, self.host, self.port)
+            logger.info(f"SOCKS5 proxy running on {self.host}:{self.port}")
+            async with self.asyncio_server:
+                await self.asyncio_server.serve_forever()
+        except KeyboardInterrupt:
+            logger.info("Server is closed")
+
+    def start(self):
+        try:
+            asyncio.run(self.async_start())
+        except KeyboardInterrupt:
+            logger.info("Server is closed")
 
     async def handle_client(self, reader, writer):
         try:
-
+            client_ip, client_port = writer.get_extra_info("peername")
+            if not self.users_black_list is None:
+                if client_ip in self.users_black_list:
+                    logger.warning(f"Blocked connection from blacklisted IP: {client_ip}")
+                    return
+            if not self.user_white_list is None:
+                if not client_ip in self.user_white_list:
+                    logger.warning(f"Blocked connection from non-whitelisted IP: {client_ip}")
+                    return
 
             socks_version, nmethods = await reader.readexactly(2)
             if socks_version != self.socks_version:
-                print("[-] Unsupported SOCKS version:", socks_version)
+                logger.error(f"Unsupported SOCKS version: {socks_version}")
                 return
 
             methods = await reader.readexactly(nmethods)
@@ -49,7 +81,7 @@ class Socks5Server:
                 await writer.drain()
                 auth_ok = await self.auth_userpass(reader, writer)
                 if not auth_ok:
-                    print("[-] Authentication failed")
+                    logger.warning(f"Authentication failed {client_ip}:{client_port}")
                     return
             elif supports_no_auth and self.accept_anonymous:
                 writer.write(bytes([self.socks_version, 0x00]))
@@ -62,10 +94,10 @@ class Socks5Server:
             addr, port, command = await self.handle_command(reader, writer)
 
             connection_result = await command(self, addr, port, reader, writer)
-            print(f'[+] Сompleted the operation successfully, code: {connection_result}')
+            logger.info(f'Сompleted the operation successfully, code: {connection_result}')
 
         except Exception as e:
-            print(f"[-] Connection error: {e}")
+            logger.error(f"Connection error: {e}")
 
         finally:
             writer.close()
@@ -75,10 +107,10 @@ class Socks5Server:
     async def handle_command(self, reader, writer) -> Tuple[str, int, callable]:
         socks_version, cmd, rsv, address_type = await reader.readexactly(4)
         if socks_version != self.socks_version:
-            raise ConnectionError(f"[-] Unsupported SOCKS version: {socks_version}")
+            raise ConnectionError(f"Unsupported SOCKS version: {socks_version}")
 
         if not cmd in self.user_commands.keys():
-            raise ConnectionError(f"[-] Unsupported command: {cmd}, it must be one of {list(self.user_commands.keys())}")
+            raise ConnectionError(f"Unsupported command: {cmd}, it must be one of {list(self.user_commands.keys())}")
         cmd = self.user_commands[cmd]
 
         match address_type:
@@ -93,7 +125,7 @@ class Socks5Server:
                 addr_bytes = await reader.readexactly(16)
                 addr = socket.inet_ntop(socket.AF_INET6, addr_bytes)
             case _:
-                raise ConnectionError(f"[-] Invalid address: {address_type}, it must be 0x01/0x03/0x04")
+                raise ConnectionError(f"Invalid address: {address_type}, it must be 0x01/0x03/0x04")
 
         port_bytes = await reader.readexactly(2)
         port = int.from_bytes(port_bytes, byteorder='big')
@@ -109,7 +141,7 @@ class Socks5Server:
             pw_length = (await reader.readexactly(1))[0]
             pw = (await reader.readexactly(pw_length)).decode()
 
-            print(f"[+] Auth attempt: {username=} {pw=}")
+            logger.info(f"Auth attempt: {username=} {pw=}")
 
             if self.users.get(username) == pw:
                 writer.write(bytes([1, 0]))
@@ -120,24 +152,9 @@ class Socks5Server:
                 await writer.drain()
 
         else:
-            print(f"[-] Invalid auth version: {auth_version}")
+            logger.warning(f"Invalid auth version: {auth_version}")
 
         return False
-
-
-    async def pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        try:
-            while not reader.at_eof():
-                data = await reader.read(4096)
-                if not data:
-                    break
-                writer.write(data)
-                await writer.drain()
-        except Exception as e:
-            print(f"[-] Proxying error: {e}")
-        finally:
-            writer.close()
-            await writer.wait_closed()
 
     async def make_reply(self, reply_code: int, address: str = '0', port: int = 0) -> bytes:
         address_type = 0x01
@@ -159,7 +176,7 @@ class Socks5Server:
         except ValueError:
             addr_bytes = address.encode('idna')
             if len(addr_bytes) > 255:
-                raise ValueError("[-] Domain name too long for SOCKS5 protocol")
+                raise ValueError("Domain name too long for SOCKS5 protocol")
 
             address_type = 0x03
             addr_data = bytes([len(addr_bytes)]) + addr_bytes
@@ -179,11 +196,27 @@ class Socks5Server:
             port
         )
 
+    @staticmethod
+    async def pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        try:
+            while not reader.at_eof():
+                data = await reader.read(4096)
+                if not data:
+                    break
+                writer.write(data)
+                await writer.drain()
+        except Exception as e:
+            logger.error(f"Proxying error: {e}")
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
 
 class ConnectionMethods:
-    async def tcp_connection(server, addr: str, port: int,
+    @staticmethod
+    async def tcp_connection(server: Socks5Server, addr: str, port: int,
                              client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> int:
-        print(f"[+] Establishing TCP connection to {addr}:{port}...")
+        logger.info(f"Establishing TCP connection to {addr}:{port}...")
 
         try:
             remote_reader, remote_writer = await asyncio.open_connection(addr, port)
@@ -191,7 +224,7 @@ class ConnectionMethods:
             client_writer.write(await server.make_reply(0x00, local_ip, local_port))
             await client_writer.drain()
         except Exception as e:
-            print(f"[-] Failed to connect to {addr}:{port} => {e}")
+            logger.warning(f"Failed to connect to {addr}:{port} => {e}")
             client_writer.write(await server.make_reply(0xFF, '0.0.0.0', 0))
             await client_writer.drain()
             return 1
@@ -201,22 +234,24 @@ class ConnectionMethods:
             server.pipe(remote_reader, client_writer)
         )
 
-        print(f"[+] TCP connection to {addr}:{port} is closed")
+        logger.info(f"TCP connection to {addr}:{port} is closed")
         return 0
 
-    async def bind_socket(server, addr: str, port: int,
+    @staticmethod
+    async def bind_socket(server: Socks5Server, addr: str, port: int,
                           client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> int:
-        print(f"[+] bind_socket {addr}:{port}")
+        logger.info(f"bind_socket {addr}:{port}")
         return 0
 
-    async def udp_connection(server, addr: str, port: int,
+    @staticmethod
+    async def udp_connection(server: Socks5Server, addr: str, port: int,
                              client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> int:
-        print(f"[+] udp_connection {addr}:{port}")
+        logger.info(f"udp_connection {addr}:{port}")
         return 0
 
 
 if __name__ == '__main__':
-    server = Socks5Server(users={
+    SERVER = Socks5Server(users={
         "u1": "pw1",
     })
-    asyncio.run(server.start()) # добавить списки адресов белые и черные
+    SERVER.start()
