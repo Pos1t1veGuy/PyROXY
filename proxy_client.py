@@ -1,7 +1,7 @@
 from typing import *
 import asyncio
 
-from cipher import Cipher
+from base_cipher import Cipher
 from logger_setup import logger
 
 
@@ -21,21 +21,17 @@ class Socks5Client:
         asyncio.set_event_loop(self._loop)
 
     async def async_connect(self, target_host: str, target_port: int,
-                            host: str = '127.0.0.1', port: int = 1080,
+                            proxy_host: str = '127.0.0.1', proxy_port: int = 1080,
                             username: Optional[str] = None, password: Optional[str] = None):
 
-        self.reader, self.writer = await asyncio.open_connection(host, port)
-        logger.info(f"Connected to SOCKS5 proxy at {host}:{port}")
+        self.reader, self.writer = await asyncio.open_connection(proxy_host, proxy_port)
+        logger.info(f"Connected to SOCKS5 proxy at {proxy_host}:{proxy_port}")
 
         methods = [0x00]
         if username and password:
             methods.insert(0, 0x02)
 
-        await self.asend(await self.cipher.client_send_methods([
-            self.socks_version,
-            len(methods),
-            *methods,
-        ]))
+        await self.asend(await self.cipher.client_send_methods(self.socks_version, methods), encrypt=False)
         method_chosen = await self.cipher.client_get_method(self.reader)
 
         if method_chosen == 0xFF:
@@ -59,31 +55,34 @@ class Socks5Client:
         cmd_bytes = await self.cipher.client_command(
             self.socks_version, self.user_commands['connect'], target_host, target_port
         )
-        await self.asend(cmd_bytes)
-        await self.cipher.client_connect_confirm(self.reader)
+        await self.asend(cmd_bytes, encrypt=False)
+        connected = await self.cipher.client_connect_confirm(self.reader)
 
-        logger.info(f"Connected to {target_host}:{target_port} through proxy.")
+        if connected:
+            logger.info(f"Connected to {target_host}:{target_port} through proxy")
+        else:
+            logger.error(f'Failed to connect to {target_host}:{target_port} through proxy {host}:{port}')
+            await self.close()
 
     def connect(self, target_host: str, target_port: int,
-                host: str = '127.0.0.1', port: int = 1080,
+                proxy_host: str = '127.0.0.1', proxy_port: int = 1080,
                 username: Optional[str] = None, password: Optional[str] = None):
-        return self._loop.run_until_complete(
-            self.async_connect(target_host, target_port, host=host, port=port, username=username, password=password)
-        )
+        return self._loop.run_until_complete(self.async_connect(target_host, target_port,
+                                    proxy_host=proxy_host, proxy_port=proxy_port, username=username, password=password))
 
-    async def asend(self, data: bytes):
-        self.writer.write(await self.cipher.encrypt(data))
+    async def asend(self, data: bytes, encrypt: bool = True):
+        self.writer.write(await self.cipher.encrypt(data) if encrypt else data)
         await self.writer.drain()
 
-    def send(self, data: bytes):
-        return self._loop.run_until_complete(self.asend(data))
+    def send(self, data: bytes, encrypt: bool = True):
+        return self._loop.run_until_complete(self.asend(data, encrypt=encrypt))
 
-    async def arecv(self, num_bytes: int) -> bytes:
-        encrypted = await self.reader.readexactly(num_bytes)
-        return await self.cipher.decrypt(encrypted)
+    async def arecv(self, num_bytes: int, decrypt: bool = True) -> bytes:
+        data = await self.reader.readexactly(num_bytes)
+        return (await self.cipher.decrypt(data)) if decrypt else data
 
-    def recv(self, num_bytes: int):
-        return self._loop.run_until_complete(self.arecv(num_bytes))
+    def recv(self, num_bytes: int, decrypt: bool = True):
+        return self._loop.run_until_complete(self.arecv(num_bytes, decrypt=decrypt))
 
     async def async_close(self):
         if self.writer:

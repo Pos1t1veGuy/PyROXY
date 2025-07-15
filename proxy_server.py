@@ -3,7 +3,7 @@ import asyncio
 import os
 
 from logger_setup import logger
-from cipher import Cipher
+from base_cipher import Cipher
 
 
 class Socks5Server:
@@ -60,22 +60,26 @@ class Socks5Server:
                     logger.warning(f"Blocked connection from non-whitelisted IP: {client_ip}")
                     return
 
-            methods = await self.cipher.server_get_methods(self.socks_version, reader, writer)
+            methods = await self.cipher.server_get_methods(self.socks_version, reader)
 
             if methods['supports_user_pass']:
-                await self.cipher.server_send_method_to_user(self.socks_version, 0x02, reader, writer)
+                data = await self.cipher.server_send_method_to_user(self.socks_version, 0x02)
+                await self.send(writer, data)
+
                 auth_ok = await self.cipher.server_auth_userpass(self.users, reader, writer)
                 if not auth_ok:
                     logger.warning(f"Authentication failed {client_ip}:{client_port}")
                     return
             elif methods['supports_no_auth'] and self.accept_anonymous:
-                await self.cipher.server_send_method_to_user(self.socks_version, 0x00, reader, writer)
+                data = await self.cipher.server_send_method_to_user(self.socks_version, 0x00)
+                await self.send(writer, data)
             else:
-                await self.cipher.server_send_method_to_user(self.socks_version, 0xFF, reader, writer)
+                data = await self.cipher.server_send_method_to_user(self.socks_version, 0xFF)
+                await self.send(writer, data)
                 return
 
             addr, port, command = await self.cipher.server_handle_command(
-                self.socks_version, self.user_commands, reader, writer
+                self.socks_version, self.user_commands, reader
             )
 
             connection_result = await command(self, addr, port, reader, writer)
@@ -87,6 +91,11 @@ class Socks5Server:
         finally:
             writer.close()
             await writer.wait_closed()
+
+    @staticmethod
+    async def send(writer: asyncio.StreamWriter, data: bytes):
+        writer.write(data)
+        await writer.drain()
 
     @staticmethod
     async def pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
@@ -102,8 +111,7 @@ class Socks5Server:
                 if encrypt:
                     data = await encrypt(data)
 
-                writer.write(data)
-                await writer.drain()
+                await Socks5Server.send(writer, data)
         except Exception as e:
             logger.error(f"Proxying error: {e}")
         finally:
@@ -129,8 +137,8 @@ class ConnectionMethods:
             return 1
 
         await asyncio.gather(
-            server.pipe(client_reader, remote_writer, encrypt=server.cipher.encrypt),
-            server.pipe(remote_reader, client_writer, decrypt=server.cipher.decrypt)
+            server.pipe(client_reader, remote_writer, encrypt=server.cipher.decrypt),
+            server.pipe(remote_reader, client_writer, decrypt=server.cipher.encrypt)
         )
 
         logger.info(f"TCP connection to {addr}:{port} is closed")
@@ -150,10 +158,10 @@ class ConnectionMethods:
 
 
 if __name__ == '__main__':
-    #import hashlib
-    #from ext.basic_ciphers import AESCipher
-    #key = hashlib.sha256(b'my master key').digest()
+    import hashlib
+    from ext.ciphers import AESCipher
+    key = hashlib.sha256(b'my master key').digest()
     SERVER = Socks5Server(users={
         "u1": "pw1",
-    })#, cipher=AESCipher(key))
+    }, cipher=AESCipher(key))
     SERVER.start() # Доделать интеграцию с БД; Доделать шифрование и сделать пару шифраторов

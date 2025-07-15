@@ -52,12 +52,15 @@ class Cipher:
         ...
 
     @staticmethod
-    async def client_send_methods(methods: List[int]) -> bytes:
-        return bytes(methods)
+    async def client_send_methods(socks_version: int, methods: List[int]) -> bytes:
+        return bytes([
+            socks_version,
+            len(methods),
+            *methods,
+        ])
 
     @staticmethod
-    async def server_get_methods(socks_version: int, reader: asyncio.StreamReader,
-                          writer: asyncio.StreamWriter) -> Dict[str, bool]:
+    async def server_get_methods(socks_version: int, reader: asyncio.StreamReader) -> Dict[str, bool]:
         version, nmethods = await reader.readexactly(2)
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
@@ -68,6 +71,10 @@ class Cipher:
             'supports_no_auth': 0x00 in methods,
             'supports_user_pass': 0x02 in methods
         }
+
+    @staticmethod
+    async def server_send_method_to_user(socks_version: int, method: int) -> bytes:
+        return bytes([socks_version, method])
 
     @staticmethod
     async def client_get_method(reader: asyncio.StreamReader) -> int:
@@ -115,12 +122,6 @@ class Cipher:
             raise ConnectionError(f'Invalid answer received {resp}')
 
     @staticmethod
-    async def server_send_method_to_user(socks_version: int, method: int, reader: asyncio.StreamReader,
-                                  writer: asyncio.StreamWriter) -> None:
-        writer.write(bytes([socks_version, method]))
-        await writer.drain()
-
-    @staticmethod
     async def client_command(socks_version: int, user_command: int, target_host: str, target_port: int) -> bytes:
         try:
             ip = ipa.ip_address(target_host)
@@ -143,7 +144,7 @@ class Cipher:
 
     @staticmethod
     async def server_handle_command(socks_version: int, user_command_handlers: Dict[int, Callable],
-                             reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> Tuple[str, int, Callable]:
+                             reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:
 
         version, cmd, rsv, address_type = await reader.readexactly(4)
         if version != socks_version:
@@ -222,18 +223,18 @@ class Cipher:
         except IndexError:
             raise ConnectionError(f'Invalid answer received {data}')
 
-        if atyp == 0x01:  # IPv4
-            address = await reader.readexactly(4 + 2)
-            return True
-        elif atyp == 0x03:  # Domain
-            domain_len = await reader.readexactly(1)[0]
-            address = await reader.readexactly(domain_len + 2)
-            return True
-        elif atyp == 0x04:  # IPv6
-            address = await reader.readexactly(16 + 2)
-            return True
+        match atyp:
+            case 0x01:  # IPv4
+                address = await reader.readexactly(4 + 2)
+            case 0x03:  # Domain
+                domain_len = await reader.readexactly(1)[0]
+                address = await reader.readexactly(domain_len + 2)
+            case 0x04:  # IPv6
+                address = await reader.readexactly(16 + 2)
+            case _:
+                raise ConnectionError(f"Invalid address type: {atyp}")
 
-        return False
+        return True
 
 
     @staticmethod
