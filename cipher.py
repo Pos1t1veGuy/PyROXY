@@ -3,7 +3,6 @@ import socket
 import struct
 import asyncio
 import ipaddress as ipa
-from logger_setup import logger
 
 
 '''
@@ -28,41 +27,15 @@ class Cipher:
     def __init__(self):
         ...
 
-    async def get_methods(self, socks_version: int, reader: asyncio.StreamReader,
-                          writer: asyncio.StreamWriter) -> Dict[str, bool]:
-        return {}
+    @staticmethod
+    async def client_greetings(methods: List[int]) -> bytes:
+        return bytes(methods)
 
-    async def auth_userpass(self, logins: Dict[str, str], reader: asyncio.StreamReader,
-                            writer: asyncio.StreamWriter) -> bool:
-        return False
-
-    async def send_method_to_user(self, socks_version: int, method: int, reader: asyncio.StreamReader,
-                                  writer: asyncio.StreamWriter) -> None:
-        return None
-
-    async def handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
-                             reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> Tuple[str, int, Callable]:
-        return '', 0, lambda: 0
-
-    async def make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> bytes:
-        return b''
-
-    async def encrypt(self, data: bytes) -> bytes:
-        return b''
-
-    async def decrypt(self, data: bytes) -> bytes:
-        return b''
-
-
-class DefaultCipher(Cipher):
-    def __init__(self):
-        super().__init__()
-
-    async def get_methods(self, socks_version: int, reader: asyncio.StreamReader,
+    @staticmethod
+    async def server_get_methods(socks_version: int, reader: asyncio.StreamReader,
                           writer: asyncio.StreamWriter) -> Dict[str, bool]:
         version, nmethods = await reader.readexactly(2)
         if version != socks_version:
-            logger.error(f"Unsupported SOCKS version: {version}")
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
 
         methods = await reader.readexactly(nmethods)
@@ -72,7 +45,15 @@ class DefaultCipher(Cipher):
             'supports_user_pass': 0x02 in methods
         }
 
-    async def auth_userpass(self, logins: Dict[str, str], reader: asyncio.StreamReader,
+    @staticmethod
+    async def client_greetings_response(reader: asyncio.StreamReader) -> int:
+        response = await reader.readexactly(2)
+        if response[1] == 0xFF:
+            raise ConnectionError("No acceptable authentication methods.")
+        return response[1]
+
+    @staticmethod
+    async def server_auth_userpass(logins: Dict[str, str], reader: asyncio.StreamReader,
                             writer: asyncio.StreamWriter) -> bool:
         auth_version = (await reader.readexactly(1))[0]
 
@@ -83,8 +64,6 @@ class DefaultCipher(Cipher):
             pw_length = (await reader.readexactly(1))[0]
             pw = (await reader.readexactly(pw_length)).decode()
 
-            logger.info(f"Auth attempt: {username=} {pw=}")
-
             if logins.get(username) == pw:
                 writer.write(bytes([1, 0]))
                 await writer.drain()
@@ -93,17 +72,53 @@ class DefaultCipher(Cipher):
                 writer.write(bytes([1, 1]))
                 await writer.drain()
 
-        else:
-            logger.warning(f"Invalid auth version: {auth_version}")
-
         return False
 
-    async def send_method_to_user(self, socks_version: int, method: int, reader: asyncio.StreamReader,
+    @staticmethod
+    async def client_auth_userpass(username: str, password: str, reader: asyncio.StreamReader,
+                                   writer: asyncio.StreamWriter) -> bool:
+        username_bytes = username.encode()
+        password_bytes = password.encode()
+
+        data = bytes([0x01, len(username_bytes)]) + username_bytes + bytes([len(password_bytes)]) + password_bytes
+        writer.write(data)
+        await writer.drain()
+
+        resp = await reader.readexactly(2)
+        try:
+            return resp[1] == 0x00
+        except IndexError:
+            raise ConnectionError(f'Invalid answer received {resp}')
+
+    @staticmethod
+    async def server_send_method_to_user(socks_version: int, method: int, reader: asyncio.StreamReader,
                                   writer: asyncio.StreamWriter) -> None:
         writer.write(bytes([socks_version, method]))
         await writer.drain()
 
-    async def handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
+    @staticmethod
+    async def client_command(socks_version: int, user_command: int, target_host: str, target_port: int) -> bytes:
+        try:
+            ip = ipa.ip_address(target_host)
+            if ip.version == 4: # IPv4
+                atyp = 0x01
+                addr_part = ip.packed
+            else: # IPv6
+                atyp = 0x04
+                addr_part = ip.packed
+        except ValueError: # domain
+            atyp = 0x03
+            addr_bytes = target_host.encode("idna")
+            if len(addr_bytes) > 255:
+                raise ValueError("Domain name too long for SOCKS5")
+            addr_part = struct.pack("!B", len(addr_bytes)) + addr_bytes
+
+        request = struct.pack("!BBB", socks_version, user_command, 0x00)
+        request += struct.pack("!B", atyp) + addr_part + struct.pack("!H", target_port)
+        return request
+
+    @staticmethod
+    async def server_handle_command(socks_version: int, user_command_handlers: Dict[int, Callable],
                              reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> Tuple[str, int, Callable]:
 
         version, cmd, rsv, address_type = await reader.readexactly(4)
@@ -132,7 +147,8 @@ class DefaultCipher(Cipher):
         port = int.from_bytes(port_bytes, byteorder='big')
         return addr, port, cmd
 
-    async def make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> bytes:
+    @staticmethod
+    async def server_make_reply(socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> bytes:
         address_type = 0x01
         head = "!BBBB"
         addr_data = socket.inet_aton("0.0.0.0")
@@ -172,8 +188,33 @@ class DefaultCipher(Cipher):
             port
         )
 
-    async def encrypt(self, data: bytes) -> bytes:
+    @staticmethod
+    async def client_connect_confirm(reader: asyncio.StreamReader) -> bool:
+        data = await reader.readexactly(4)
+        try:
+            if data[1] != 0x00:
+                raise ConnectionError(f"SOCKS5 CONNECT failed with code {data[1]:02x}")
+            atyp = data[3]
+        except IndexError:
+            raise ConnectionError(f'Invalid answer received {data}')
+
+        if atyp == 0x01:  # IPv4
+            address = await reader.readexactly(4 + 2)
+            return True
+        elif atyp == 0x03:  # Domain
+            domain_len = await reader.readexactly(1)[0]
+            address = await reader.readexactly(domain_len + 2)
+            return True
+        elif atyp == 0x04:  # IPv6
+            address = await reader.readexactly(16 + 2)
+            return True
+
+        return False
+
+    @staticmethod
+    async def encrypt(data: bytes) -> bytes:
         return data
 
-    async def decrypt(self, data: bytes) -> bytes:
+    @staticmethod
+    async def decrypt(data: bytes) -> bytes:
         return data

@@ -1,8 +1,9 @@
 from typing import *
 import asyncio
+import os
 
 from logger_setup import logger
-from cipher import Cipher, DefaultCipher
+from cipher import Cipher
 
 
 class Socks5Server:
@@ -22,7 +23,7 @@ class Socks5Server:
         self.port = port
         self.user_white_list = user_white_list
         self.users_black_list = users_black_list
-        self.cipher = DefaultCipher() if cipher is None else cipher
+        self.cipher = Cipher if cipher is None else cipher
 
         self.user_commands_default = {
             0x01: ConnectionMethods.tcp_connection,
@@ -59,21 +60,21 @@ class Socks5Server:
                     logger.warning(f"Blocked connection from non-whitelisted IP: {client_ip}")
                     return
 
-            methods = await self.cipher.get_methods(self.socks_version, reader, writer)
+            methods = await self.cipher.server_get_methods(self.socks_version, reader, writer)
 
             if methods['supports_user_pass']:
-                await self.cipher.send_method_to_user(self.socks_version, 0x02, reader, writer)
-                auth_ok = await self.cipher.auth_userpass(self.users, reader, writer)
+                await self.cipher.server_send_method_to_user(self.socks_version, 0x02, reader, writer)
+                auth_ok = await self.cipher.server_auth_userpass(self.users, reader, writer)
                 if not auth_ok:
                     logger.warning(f"Authentication failed {client_ip}:{client_port}")
                     return
             elif methods['supports_no_auth'] and self.accept_anonymous:
-                await self.cipher.send_method_to_user(self.socks_version, 0x00, reader, writer)
+                await self.cipher.server_send_method_to_user(self.socks_version, 0x00, reader, writer)
             else:
-                await self.cipher.send_method_to_user(self.socks_version, 0xFF, reader, writer)
+                await self.cipher.server_send_method_to_user(self.socks_version, 0xFF, reader, writer)
                 return
 
-            addr, port, command = await self.cipher.handle_command(
+            addr, port, command = await self.cipher.server_handle_command(
                 self.socks_version, self.user_commands, reader, writer
             )
 
@@ -119,11 +120,11 @@ class ConnectionMethods:
         try:
             remote_reader, remote_writer = await asyncio.open_connection(addr, port)
             local_ip, local_port = remote_writer.get_extra_info("sockname")
-            client_writer.write(await server.cipher.make_reply(server.socks_version, 0x00, local_ip, local_port))
+            client_writer.write(await server.cipher.server_make_reply(server.socks_version, 0x00, local_ip, local_port))
             await client_writer.drain()
         except Exception as e:
             logger.warning(f"Failed to connect to {addr}:{port} => {e}")
-            client_writer.write(await server.cipher.make_reply(server.socks_version, 0xFF, '0.0.0.0', 0))
+            client_writer.write(await server.cipher.server_make_reply(server.socks_version, 0xFF, '0.0.0.0', 0))
             await client_writer.drain()
             return 1
 
@@ -149,7 +150,10 @@ class ConnectionMethods:
 
 
 if __name__ == '__main__':
+    #import hashlib
+    #from ext.basic_ciphers import AESCipher
+    #key = hashlib.sha256(b'my master key').digest()
     SERVER = Socks5Server(users={
         "u1": "pw1",
-    })
+    })#, cipher=AESCipher(key))
     SERVER.start()
