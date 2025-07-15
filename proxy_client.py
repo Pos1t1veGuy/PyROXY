@@ -31,12 +31,12 @@ class Socks5Client:
         if username and password:
             methods.insert(0, 0x02)
 
-        await self.asend(await self.cipher.client_greetings([
+        await self.asend(await self.cipher.client_send_methods([
             self.socks_version,
             len(methods),
             *methods,
         ]))
-        method_chosen = await self.cipher.client_greetings_response(self.reader)
+        method_chosen = await self.cipher.client_get_method(self.reader)
 
         if method_chosen == 0xFF:
             raise ConnectionError("No acceptable authentication methods.")

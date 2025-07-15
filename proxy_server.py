@@ -156,4 +156,4 @@ if __name__ == '__main__':
     SERVER = Socks5Server(users={
         "u1": "pw1",
     })#, cipher=AESCipher(key))
-    SERVER.start()
+    SERVER.start() # Доделать интеграцию с БД; Доделать шифрование и сделать пару шифраторов

@@ -6,20 +6,44 @@ import ipaddress as ipa
 
 
 '''
-To establish a SOCKS5 connection, the client and server must complete a handshake consisting of 4–5 steps:
+SOCKS5 HANDSHAKE STRUCTURE (client and server):
 
-1. get_methods – The server receives a list of supported authentication methods from the client.
-   This method must return: {'supports_no_auth': bool, 'supports_user_pass': bool}.
-2. auth_userpass (*) – If the client wants to authenticate, the server checks whether the client
-   exists in the user dictionary.
-3. send_method_to_user – The server selects an authentication method (no_auth/auth = 0x00/0x02)
-   and informs the client.
-4. handle_command – The server receives a client command (CONNECT/BIND/UDP_ASSOCIATE = 0x01/0x03/0x04),
-   extracts the destination address and port, and determines the handler method.
-5. make_reply – This final step confirms the SOCKS5 connection. It sends a reply indicating
-   whether the connection was successfully established.
+To establish a SOCKS5 connection, both the client and server must follow a specific handshake protocol,
+which typically consists of 4–5 stages. This class defines symmetric methods for both parties.
 
-If the connection is successful, data exchange begins using the 'encrypt' and 'decrypt' methods.
+▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
+[ CLIENT SIDE ]                         [ SERVER SIDE ]
+▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
+1. client_send_methods →              → server_get_methods
+   - Client sends SOCKS version and list of supported auth methods.
+
+2. client_get_method ←                ← server_send_method_to_user
+   - Server selects an auth method and responds.
+
+3. client_auth_userpass →             → server_auth_userpass
+   - If selected method is username/password (0x02), client authenticates.
+
+4. client_command →                   → server_handle_command
+   - Client requests to CONNECT, BIND or ASSOCIATE (usually 0x01 = TCP connect),
+     and provides destination address and port.
+
+5. client_connect_confirm ←           ← server_make_reply
+   - Server replies with success or failure and bound address/port.
+
+▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
+
+If the handshake is successful (reply code 0x00), the SOCKS tunnel is established.
+All further traffic is sent over this tunnel.
+
+After that:
+- `encrypt(data)` and `decrypt(data)` are used to optionally obfuscate or secure traffic.
+- These can be customized (e.g., with XOR, AES, session keys, etc.) to implement encryption
+  or detection evasion mechanisms similar to obfs4 or ShadowSocks.
+
+Each `Cipher` subclass must implement or override:
+- Handshake stages (client and/or server side)
+- `encrypt(data: bytes) -> bytes`
+- `decrypt(data: bytes) -> bytes`
 '''
 
 
@@ -28,7 +52,7 @@ class Cipher:
         ...
 
     @staticmethod
-    async def client_greetings(methods: List[int]) -> bytes:
+    async def client_send_methods(methods: List[int]) -> bytes:
         return bytes(methods)
 
     @staticmethod
@@ -46,7 +70,7 @@ class Cipher:
         }
 
     @staticmethod
-    async def client_greetings_response(reader: asyncio.StreamReader) -> int:
+    async def client_get_method(reader: asyncio.StreamReader) -> int:
         response = await reader.readexactly(2)
         if response[1] == 0xFF:
             raise ConnectionError("No acceptable authentication methods.")
@@ -210,6 +234,7 @@ class Cipher:
             return True
 
         return False
+
 
     @staticmethod
     async def encrypt(data: bytes) -> bytes:
