@@ -49,7 +49,7 @@ Each `Cipher` subclass must implement or override:
 
 class Cipher:
     def __init__(self):
-        ...
+        self.bytes_block = 4096
 
     @staticmethod
     async def client_send_methods(socks_version: int, methods: List[int]) -> bytes:
@@ -244,3 +244,19 @@ class Cipher:
     @staticmethod
     async def decrypt(data: bytes) -> bytes:
         return data
+
+
+class IVCipher(Cipher):
+    def __init__(self, key: bytes, iv: Optional[bytes] = None):
+        super().__init__()
+        self.key = key
+        assert iv is None or len(iv) == 16, "IV must be exactly 16 bytes"
+        self.iv = iv
+        self.encryptor = None
+        self.decryptor = None
+
+        if iv is not None:
+            self._init_ciphers(iv)
+
+    def _init_ciphers(self, iv: bytes):
+        raise NotImplementedError("Override this method in subclass")
