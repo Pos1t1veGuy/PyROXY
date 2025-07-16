@@ -71,18 +71,19 @@ class Socks5Client:
                                     proxy_host=proxy_host, proxy_port=proxy_port, username=username, password=password))
 
     async def asend(self, data: bytes, encrypt: bool = True):
-        self.writer.write(await self.cipher.encrypt(data) if encrypt else data)
+        data = await self.cipher.encrypt(data) if encrypt else data
+        self.writer.write(data)
         await self.writer.drain()
 
     def send(self, data: bytes, encrypt: bool = True):
         return self._loop.run_until_complete(self.asend(data, encrypt=encrypt))
 
-    async def arecv(self, num_bytes: int, decrypt: bool = True) -> bytes:
+    async def arecv(self, num_bytes: int, decrypt: bool = True, **kwargs) -> bytes:
         data = await self.reader.readexactly(num_bytes)
-        return (await self.cipher.decrypt(data)) if decrypt else data
+        return await self.cipher.decrypt(data, **kwargs) if decrypt else data
 
-    def recv(self, num_bytes: int, decrypt: bool = True):
-        return self._loop.run_until_complete(self.arecv(num_bytes, decrypt=decrypt))
+    def recv(self, num_bytes: int, **kwargs):
+        return self._loop.run_until_complete(self.arecv(num_bytes, **kwargs))
 
     async def async_close(self):
         if self.writer:
@@ -97,12 +98,12 @@ class Socks5Client:
 
 
 if __name__ == '__main__':
-    # from ext.basic_ciphers import AESCipher
+    from ext.basic_ciphers import AESCipherCTR
 
-    # key = hashlib.sha256(b'my master key').digest()[:16]
-    # iv = os.urandom(16)
+    key = hashlib.sha256(b'my master key').digest()[:16]
+    iv = os.urandom(16)
 
-    client = Socks5Client()#cipher=AESCipher(key, iv))
+    client = Socks5Client(cipher=AESCipherCTR(key, iv))
     client.connect('ifconfig.me', 80, username='u1', password='pw1')
     client.send(b"GET / HTTP/1.1\r\nHost: ifconfig.me\r\n\r\n")
     print(client.recv(512))

@@ -85,8 +85,8 @@ class Socks5Server:
             connection_result = await command(self, addr, port, reader, writer)
             logger.info(f'Сompleted the operation successfully, code: {connection_result}')
 
-        except Exception as e:
-            logger.error(f"Connection error: {e}")
+        # except Exception as e:
+        #     logger.error(f"Connection error: {e}")
 
         finally:
             writer.close()
@@ -137,8 +137,8 @@ class ConnectionMethods:
             return 1
 
         await asyncio.gather(
-            server.pipe(client_reader, remote_writer, encrypt=server.cipher.decrypt),
-            server.pipe(remote_reader, client_writer, decrypt=server.cipher.encrypt)
+            server.pipe(client_reader, remote_writer, decrypt=server.cipher.decrypt), # client -> server
+            server.pipe(remote_reader, client_writer, encrypt=server.cipher.encrypt), # client <- servers
         )
 
         logger.info(f"TCP connection to {addr}:{port} is closed")
@@ -159,9 +159,9 @@ class ConnectionMethods:
 
 if __name__ == '__main__':
     import hashlib
-    from ext.ciphers import AESCipher
+    from ext.ciphers import AESCipherCTR
     key = hashlib.sha256(b'my master key').digest()
     SERVER = Socks5Server(users={
         "u1": "pw1",
-    }, cipher=AESCipher(key))
-    SERVER.start() # Доделать интеграцию с БД; Доделать шифрование и сделать пару шифраторов
+    }, cipher=AESCipherCTR(key))
+    SERVER.start() # Доделать интеграцию с БД; Сделать пару шифраторов
