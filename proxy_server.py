@@ -85,8 +85,8 @@ class Socks5Server:
             connection_result = await command(self, addr, port, reader, writer)
             logger.info(f'Сompleted the operation successfully, code: {connection_result}')
 
-        # except Exception as e:
-        #     logger.error(f"Connection error: {e}")
+        except Exception as e:
+            logger.error(f"Connection error: {e}")
 
         finally:
             writer.close()
