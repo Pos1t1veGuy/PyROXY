@@ -14,7 +14,8 @@ class Socks5Server:
                  cipher: Optional[Cipher] = None,
                  user_commands: Optional[Dict[bytes, callable]] = None,
                  users: Optional[Dict[str, str]] = None,
-                 accept_anonymous: bool = False):
+                 accept_anonymous: bool = False,
+                 log_bytes: bool = True):
 
         self.socks_version = 5
         self.accept_anonymous = accept_anonymous
@@ -23,6 +24,7 @@ class Socks5Server:
         self.port = port
         self.user_white_list = user_white_list
         self.users_black_list = users_black_list
+        self.log_bytes = log_bytes # only after handshake
         self.cipher = Cipher if cipher is None else cipher
 
         self.user_commands_default = {
@@ -32,6 +34,8 @@ class Socks5Server:
         }
         self.user_commands = self.user_commands_default if user_commands is None else user_commands
         self.asyncio_server = None
+        self.bytes_sent = 0
+        self.bytes_received = 0
 
     async def async_start(self):
         try:
@@ -64,7 +68,7 @@ class Socks5Server:
 
             if methods['supports_user_pass']:
                 data = await self.cipher.server_send_method_to_user(self.socks_version, 0x02)
-                await self.send(writer, data)
+                await self.send(writer, data, log_bytes=False)
 
                 auth_ok = await self.cipher.server_auth_userpass(self.users, reader, writer)
                 if not auth_ok:
@@ -72,10 +76,10 @@ class Socks5Server:
                     return
             elif methods['supports_no_auth'] and self.accept_anonymous:
                 data = await self.cipher.server_send_method_to_user(self.socks_version, 0x00)
-                await self.send(writer, data)
+                await self.send(writer, data, log_bytes=False)
             else:
                 data = await self.cipher.server_send_method_to_user(self.socks_version, 0xFF)
-                await self.send(writer, data)
+                await self.send(writer, data, log_bytes=False)
                 return
 
             addr, port, command = await self.cipher.server_handle_command(
@@ -92,31 +96,33 @@ class Socks5Server:
             writer.close()
             await writer.wait_closed()
 
-    @staticmethod
-    async def send(writer: asyncio.StreamWriter, data: bytes):
-        writer.write(data)
-        await writer.drain()
-
-    @staticmethod
-    async def pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+    async def pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                    encrypt: Optional[callable] = None, decrypt: Optional[callable] = None):
         try:
             while not reader.at_eof():
                 data = await reader.read(4096)
                 if not data:
                     break
+                if self.log_bytes:
+                    self.bytes_received += len(data)
 
                 if decrypt:
                     data = await decrypt(data)
                 if encrypt:
                     data = await encrypt(data)
 
-                await Socks5Server.send(writer, data)
+                await self.send(writer, data)
         except Exception as e:
             logger.error(f"Proxying error: {e}")
         finally:
             writer.close()
             await writer.wait_closed()
+
+    async def send(self, writer: asyncio.StreamWriter, data: bytes, log_bytes: bool = True):
+        writer.write(data)
+        if self.log_bytes and log_bytes:
+            self.bytes_sent += len(data)
+        await writer.drain()
 
 
 class ConnectionMethods:

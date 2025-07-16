@@ -6,11 +6,14 @@ from logger_setup import logger
 
 
 class Socks5Client:
-    def __init__(self, cipher: Optional[Cipher] = None):
+    def __init__(self, cipher: Optional[Cipher] = None, log_bytes: bool = True):
         self.socks_version = 5
         self.cipher = Cipher if cipher is None else cipher
+        self.log_bytes = log_bytes # only after handshake
         self.reader: Optional[asyncio.StreamReader] = None
         self.writer: Optional[asyncio.StreamWriter] = None
+        self.bytes_sent = 0
+        self.bytes_received = 0
 
         self.user_commands = {
             'connect': 0x01,
@@ -31,7 +34,8 @@ class Socks5Client:
         if username and password:
             methods.insert(0, 0x02)
 
-        await self.asend(await self.cipher.client_send_methods(self.socks_version, methods), encrypt=False)
+        methods_msg = await self.cipher.client_send_methods(self.socks_version, methods)
+        await self.asend(methods_msg, encrypt=False, log_bytes=False)
         method_chosen = await self.cipher.client_get_method(self.reader)
 
         if method_chosen == 0xFF:
@@ -55,7 +59,7 @@ class Socks5Client:
         cmd_bytes = await self.cipher.client_command(
             self.socks_version, self.user_commands['connect'], target_host, target_port
         )
-        await self.asend(cmd_bytes, encrypt=False)
+        await self.asend(cmd_bytes, encrypt=False, log_bytes=False)
         connected = await self.cipher.client_connect_confirm(self.reader)
 
         if connected:
@@ -70,16 +74,20 @@ class Socks5Client:
         return self._loop.run_until_complete(self.async_connect(target_host, target_port,
                                     proxy_host=proxy_host, proxy_port=proxy_port, username=username, password=password))
 
-    async def asend(self, data: bytes, encrypt: bool = True):
+    async def asend(self, data: bytes, encrypt: bool = True, log_bytes: bool = True):
         data = await self.cipher.encrypt(data) if encrypt else data
+        if self.log_bytes and log_bytes:
+            self.bytes_sent += len(data)
         self.writer.write(data)
         await self.writer.drain()
 
     def send(self, data: bytes, encrypt: bool = True):
         return self._loop.run_until_complete(self.asend(data, encrypt=encrypt))
 
-    async def arecv(self, num_bytes: int, decrypt: bool = True, **kwargs) -> bytes:
+    async def arecv(self, num_bytes: int, decrypt: bool = True, log_bytes: bool = True, **kwargs) -> bytes:
         data = await self.reader.readexactly(num_bytes)
+        if self.log_bytes and log_bytes:
+            self.bytes_received += len(data)
         return await self.cipher.decrypt(data, **kwargs) if decrypt else data
 
     def recv(self, num_bytes: int, **kwargs):

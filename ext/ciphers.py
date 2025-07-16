@@ -301,7 +301,7 @@ class AESCipherCBC(AESCipherCTR):
                                         reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:
 
         header_raw = await reader.readexactly(16)
-        header = self.decrypt(header_raw)
+        header = await self.decrypt(header_raw)
         version, cmd, rsv, address_type, length = struct.unpack("!BBBBB", header[:5])
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
