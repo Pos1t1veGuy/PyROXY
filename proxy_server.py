@@ -1,8 +1,9 @@
 from typing import *
 import asyncio
+import logging
 import os
 
-from logger_setup import logger
+import logger_setup
 from base_cipher import Cipher
 
 
@@ -26,6 +27,7 @@ class Socks5Server:
         self.users_black_list = users_black_list
         self.log_bytes = log_bytes # only after handshake
         self.cipher = Cipher if cipher is None else cipher
+        self.logger = logging.getLogger(__name__)
 
         self.user_commands_default = {
             0x01: ConnectionMethods.tcp_connection,
@@ -40,28 +42,28 @@ class Socks5Server:
     async def async_start(self):
         try:
             self.asyncio_server = await asyncio.start_server(self.handle_client, self.host, self.port)
-            logger.info(f"SOCKS5 proxy running on {self.host}:{self.port}")
+            self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port}")
             async with self.asyncio_server:
                 await self.asyncio_server.serve_forever()
         except KeyboardInterrupt:
-            logger.info("Server is closed")
+            self.logger.info("Server is closed")
 
     def start(self):
         try:
             asyncio.run(self.async_start())
         except KeyboardInterrupt:
-            logger.info("Server is closed")
+            self.logger.info("Server is closed")
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
             client_ip, client_port = writer.get_extra_info("peername")
             if not self.users_black_list is None:
                 if client_ip in self.users_black_list:
-                    logger.warning(f"Blocked connection from blacklisted IP: {client_ip}")
+                    self.logger.warning(f"Blocked connection from blacklisted IP: {client_ip}")
                     return
             if not self.user_white_list is None:
                 if not client_ip in self.user_white_list:
-                    logger.warning(f"Blocked connection from non-whitelisted IP: {client_ip}")
+                    self.logger.warning(f"Blocked connection from non-whitelisted IP: {client_ip}")
                     return
 
             methods = await self.cipher.server_get_methods(self.socks_version, reader)
@@ -72,7 +74,7 @@ class Socks5Server:
 
                 auth_ok = await self.cipher.server_auth_userpass(self.users, reader, writer)
                 if not auth_ok:
-                    logger.warning(f"Authentication failed {client_ip}:{client_port}")
+                    self.logger.warning(f"Authentication failed {client_ip}:{client_port}")
                     return
             elif methods['supports_no_auth'] and self.accept_anonymous:
                 data = await self.cipher.server_send_method_to_user(self.socks_version, 0x00)
@@ -87,10 +89,10 @@ class Socks5Server:
             )
 
             connection_result = await command(self, addr, port, reader, writer)
-            logger.info(f'Сompleted the operation successfully, code: {connection_result}')
+            self.logger.info(f'Сompleted the operation successfully, code: {connection_result}')
 
         except Exception as e:
-            logger.error(f"Connection error: {e}")
+            self.logger.error(f"Connection error: {e}")
 
         finally:
             writer.close()
@@ -113,7 +115,7 @@ class Socks5Server:
 
                 await self.send(writer, data)
         except Exception as e:
-            logger.error(f"Proxying error: {e}")
+            self.logger.error(f"Proxying error: {e}")
         finally:
             writer.close()
             await writer.wait_closed()
@@ -129,7 +131,7 @@ class ConnectionMethods:
     @staticmethod
     async def tcp_connection(server: Socks5Server, addr: str, port: int,
                              client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> int:
-        logger.info(f"Establishing TCP connection to {addr}:{port}...")
+        server.logger.info(f"Establishing TCP connection to {addr}:{port}...")
 
         try:
             remote_reader, remote_writer = await asyncio.open_connection(addr, port)
@@ -137,7 +139,7 @@ class ConnectionMethods:
             client_writer.write(await server.cipher.server_make_reply(server.socks_version, 0x00, local_ip, local_port))
             await client_writer.drain()
         except Exception as e:
-            logger.warning(f"Failed to connect to {addr}:{port} => {e}")
+            server.logger.warning(f"Failed to connect to {addr}:{port} => {e}")
             client_writer.write(await server.cipher.server_make_reply(server.socks_version, 0xFF, '0.0.0.0', 0))
             await client_writer.drain()
             return 1
@@ -147,19 +149,19 @@ class ConnectionMethods:
             server.pipe(remote_reader, client_writer, encrypt=server.cipher.encrypt), # client <- servers
         )
 
-        logger.info(f"TCP connection to {addr}:{port} is closed")
+        server.logger.info(f"TCP connection to {addr}:{port} is closed")
         return 0
 
     @staticmethod
     async def bind_socket(server: Socks5Server, addr: str, port: int,
                           client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> int:
-        logger.info(f"bind_socket {addr}:{port}")
+        server.logger.info(f"bind_socket {addr}:{port}")
         return 0
 
     @staticmethod
     async def udp_connection(server: Socks5Server, addr: str, port: int,
                              client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> int:
-        logger.info(f"udp_connection {addr}:{port}")
+        server.logger.info(f"udp_connection {addr}:{port}")
         return 0
 
 

@@ -1,8 +1,9 @@
 from typing import *
 import asyncio
+import logging
 
 from base_cipher import Cipher
-from logger_setup import logger
+import logger_setup
 
 
 class Socks5Client:
@@ -14,6 +15,7 @@ class Socks5Client:
         self.writer: Optional[asyncio.StreamWriter] = None
         self.bytes_sent = 0
         self.bytes_received = 0
+        self.logger = logging.getLogger(__name__)
 
         self.user_commands = {
             'connect': 0x01,
@@ -28,7 +30,7 @@ class Socks5Client:
                             username: Optional[str] = None, password: Optional[str] = None):
 
         self.reader, self.writer = await asyncio.open_connection(proxy_host, proxy_port)
-        logger.info(f"Connected to SOCKS5 proxy at {proxy_host}:{proxy_port}")
+        self.logger.info(f"Connected to SOCKS5 proxy at {proxy_host}:{proxy_port}")
 
         methods = [0x00]
         if username and password:
@@ -48,10 +50,10 @@ class Socks5Client:
             auth_ok = await self.cipher.client_auth_userpass(username, password, self.reader, self.writer)
             if not auth_ok:
                 raise ConnectionError("Authentication failed")
-            logger.info("Authenticated successfully")
+            self.logger.info("Authenticated successfully")
 
         elif method_chosen == 0x00:
-            logger.info("No authentication required by proxy")
+            self.logger.info("No authentication required by proxy")
 
         else:
             raise ConnectionError(f"Unsupported authentication method selected by proxy: {method_chosen}")
@@ -63,9 +65,9 @@ class Socks5Client:
         connected = await self.cipher.client_connect_confirm(self.reader)
 
         if connected:
-            logger.info(f"Connected to {target_host}:{target_port} through proxy")
+            self.logger.info(f"Connected to {target_host}:{target_port} through proxy")
         else:
-            logger.error(f'Failed to connect to {target_host}:{target_port} through proxy {host}:{port}')
+            self.logger.error(f'Failed to connect to {target_host}:{target_port} through proxy {host}:{port}')
             await self.close()
 
     def connect(self, target_host: str, target_port: int,
@@ -97,7 +99,7 @@ class Socks5Client:
         if self.writer:
             self.writer.close()
             await self.writer.wait_closed()
-            logger.info("Connection closed.")
+            self.logger.info("Connection closed.")
 
     def close(self):
         self._loop.run_until_complete(self.async_close())
