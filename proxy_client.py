@@ -13,6 +13,7 @@ class Socks5Client:
         self.log_bytes = log_bytes # only after handshake
         self.reader: Optional[asyncio.StreamReader] = None
         self.writer: Optional[asyncio.StreamWriter] = None
+        self.connected = False
         self.bytes_sent = 0
         self.bytes_received = 0
         self.logger = logging.getLogger(__name__)
@@ -22,6 +23,10 @@ class Socks5Client:
             'bind': 0x02,
             'associate': 0x03,
         }
+        self._host = None
+        self._port = None
+        self._proxy_host = None
+        self._proxy_port = None
         self._loop = asyncio.new_event_loop()
         self._pt_buffer = bytearray()
         asyncio.set_event_loop(self._loop)
@@ -66,6 +71,11 @@ class Socks5Client:
         connected = await self.cipher.client_connect_confirm(self.reader)
 
         if connected:
+            self._host = target_host
+            self._port = target_port
+            self._proxy_host = proxy_host
+            self._proxy_port = proxy_port
+            self.connected = True
             self.logger.info(f"Connected to {target_host}:{target_port} through proxy")
         else:
             self.logger.error(f'Failed to connect to {target_host}:{target_port} through proxy {host}:{port}')
@@ -194,9 +204,15 @@ class Socks5Client:
         if self.writer:
             self.writer.close()
             await self.writer.wait_closed()
+            self.connected = False
             self.logger.info("Connection closed.")
 
     def close(self):
         self._loop.run_until_complete(self.async_close())
         self._loop.stop()
         self._loop.close()
+
+
+    def __str__(self):
+        connection = f'connected="{self._host}:{self._port}" proxy="{self._proxy_host}:{self._proxy_port}"'
+        return f'{self.__class__.__name__}({connection if self.connected else "waiting"}, cipher={self.cipher})'

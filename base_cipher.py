@@ -49,7 +49,7 @@ Each `Cipher` subclass must implement or override:
 
 class Cipher:
     def __init__(self):
-        self.bytes_block = 4096
+        ...
 
     @staticmethod
     async def client_send_methods(socks_version: int, methods: List[int]) -> bytes:

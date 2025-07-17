@@ -190,11 +190,6 @@ class AESCipherCTR(IVCipher):
 
 
 class AESCipherCBC(AESCipherCTR):
-    def __init__(self, key: bytes, iv: Optional[bytes] = None):
-        assert len(key) in (16, 24, 32), "AES key must be 128, 192, or 256 bits"
-        super().__init__(key, iv=iv)
-        self.bytes_block = 16
-
     def _init_ciphers(self, iv: bytes):
         self.encryptor = AES.new(self.key, AES.MODE_CBC, iv=iv)
         self.decryptor = AES.new(self.key, AES.MODE_CBC, iv=iv)

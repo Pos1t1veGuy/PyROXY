@@ -62,7 +62,24 @@ client.close()
 
 ---
 
-### 📖 Client read methods
+### 🧩 SOCKS5 Server Constructor
+
+```python
+class Socks5Server:
+    def __init__(self,
+                 host: str = '127.0.0.1', port: int = 1080,
+                 user_white_list: Optional[Set[str]] = None,
+                 users_black_list: Optional[Set[str]] = None,
+                 cipher: Optional[Cipher] = None,
+                 users: Optional[Dict[str, str]] = None,
+                 accept_anonymous: bool = False,
+                 log_bytes: bool = True):
+        ...
+```
+
+---
+
+### 📖 Client Read Methods
 
 ```python
 async def aread(self, num_bytes: int = -1, decrypt: bool = True, log_bytes: bool = True, **kwargs) -> bytes:
@@ -86,6 +103,19 @@ def readline(self, **kwargs) -> bytes:
 ```
 Here is async `a...` methods and sync. `**kwargs` is passed as an argument to the decryption function.
 Important note: block ciphers do not work well with tcp and the client must split the blocks itself.
+
+---
+
+### ✏️ User Commands May Be Overrided!
+
+```python
+USER_COMMANDS = {
+    0x01: ConnectionMethods.tcp_connection,
+    0x02: ConnectionMethods.bind_socket,
+    0x03: ConnectionMethods.udp_connection,
+}
+```
+You can add items to my_proxy.USER_COMMANDS dict to SOCKS5 customization
 
 ---
 
@@ -201,6 +231,36 @@ Attach it to your server and client:
 ```python
 server = Socks5Server(cipher=MyCipher)
 client = Socks5Client(cipher=MyCipher)
+```
+
+---
+
+## Using Example
+
+```python
+from my_proxy.ext.ciphers import AESCipherCTR
+from my_proxy import Socks5Client, Socks5Server
+import asyncio
+import hashlib
+import os
+
+async def main(host='127.0.0.1', port=1080, client_cipher: Cipher = Cipher, server_cipher: Cipher = Cipher):
+    async with Socks5Server(host=host, port=port, users={'u1':'pw1'}, cipher=server_cipher) as server:
+        client = Socks5Client(cipher=client_cipher)
+        await client.async_connect('ifconfig.me', 80, proxy_host=host, proxy_port=port, username='u1', password='pw1')
+
+        await client.asend(b"GET /ip HTTP/1.1\r\nHost: ifconfig.me\r\nConnection: close\r\n\r\n")
+        response = await client.aread(-1)
+        print('Response:', response.decode())
+
+        await client.async_close()
+
+key = hashlib.sha256(b'my master key').digest()
+iv = os.urandom(16)
+server_cipher = AESCipherCTR(key=key)
+client_cipher = AESCipherCTR(key=key, iv=iv)
+
+asyncio.run(main(server_cipher=server_cipher, client_cipher=client_cipher))
 ```
 
 ---
