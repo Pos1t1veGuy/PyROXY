@@ -13,6 +13,7 @@ class Socks5Server:
                  user_white_list: Optional[Set[str]] = None,
                  users_black_list: Optional[Set[str]] = None,
                  cipher: Optional[Cipher] = None,
+                 udp_cipher: Optional[Cipher] = None,
                  users: Optional[Dict[str, str]] = None,
                  user_commands: Optional[Dict[bytes, callable]] = None,
                  accept_anonymous: bool = False,
@@ -27,6 +28,7 @@ class Socks5Server:
         self.users_black_list = users_black_list
         self.log_bytes = log_bytes # only after handshake
         self.cipher = Cipher if cipher is None else cipher
+        self.udp_cipher = Cipher if udp_cipher is None else udp_cipher
         self.logger = logging.getLogger(__name__)
 
         self.user_commands = USER_COMMANDS if user_commands is None else user_commands
@@ -69,10 +71,11 @@ class Socks5Server:
                 data = await self.cipher.server_send_method_to_user(self.socks_version, 0x02)
                 await self.send(writer, data, log_bytes=False)
 
-                auth_ok = await self.cipher.server_auth_userpass(self.users_auth_data, reader, writer)
-                if not auth_ok:
+                auth_data = await self.cipher.server_auth_userpass(self.users_auth_data, reader, writer)
+                if not auth_data:
                     self.logger.warning(f"Authentication failed {client_ip}:{client_port}")
                     return
+                user.username, user.password = auth_data
             elif methods['supports_no_auth'] and self.accept_anonymous:
                 data = await self.cipher.server_send_method_to_user(self.socks_version, 0x00)
                 await self.send(writer, data, log_bytes=False)
@@ -90,8 +93,8 @@ class Socks5Server:
             connection_result = await command(self, addr, port, reader, writer)
             self.logger.info(f'Сompleted the operation successfully, code: {connection_result}')
 
-        except Exception as e:
-            self.logger.error(f"Connection error: {e}")
+        # except Exception as e:
+        #     self.logger.error(f"Connection error: {e}")
 
         finally:
             await user.disconnect()
@@ -206,28 +209,147 @@ class User:
         return f'{self.__class__.__name__}("{self.username}", id={self.id}, handshaked={self.handshaked}, address={address})'
 
 
-class Socks5UDPServer:
+class UDPServerProxy(asyncio.DatagramProtocol): # TODO: timeout
     def __init__(self, tcp_server: Socks5Server, client_writer: asyncio.StreamWriter):
         self.tcp_server = tcp_server
+        self.cipher = self.tcp_server.udp_cipher # TODO: make udp cipher
         self.client_writer = client_writer
         self.logger = self.tcp_server.logger
+        self.client_addr: Optional[Tuple[str, int]] = None
         self.transport = None
 
     def connection_made(self, transport):
         self.transport = transport
         self.logger.info(f"UDP server started on {transport.get_extra_info('sockname')}")
 
-    def datagram_received(self, data, addr):
-        print(f"Received {len(data)} bytes from {addr}")
-        # TODO: Распарсить SOCKS5 UDP header, достать DST.ADDR/DST.PORT и данные
-        # TODO: Переслать данные на целевой хост через asyncio.open_connection (TCP) или asyncio Datagram
-        # TODO: Ответы завернуть в SOCKS5 UDP Response Header и отправить обратно self.transport.sendto(...)
+    def datagram_received(self, data: bytes, addr: Tuple[str, int]):
+        self.logger.info(f"UDP packet received from {addr}")
+
+        if self.client_addr is None:
+            self.client_addr = addr
+
+        if addr == self.client_addr:
+            self.handle_client(data, addr)
+        else:
+            self.handle_remote(data, addr)
+
+    def handle_client(self, data: bytes, addr: Tuple[str, int]):
+        try:
+            if len(data) < 4:
+                self.logger.warning("UDP packet too short for SOCKS5 header.")
+                return
+
+            rsv, frag, atyp = struct.unpack("!HBB", data[:4])
+            if rsv != 0 or frag != 0:
+                # TODO: make fragmentation
+                self.logger.warning(f"Unsupported fragmentation (FRAG={frag}) or bad RSV={rsv}. Dropping.")
+                return
+
+            offset = 4
+            if atyp == 0x01:  # IPv4
+                if len(data) < offset + 4 + 2:
+                    self.logger.warning("Truncated IPv4 header in UDP packet.")
+                    return
+                dst_addr = socket.inet_ntoa(data[offset:offset + 4])
+                offset += 4
+
+            elif atyp == 0x03:  # Domain
+                if len(data) < offset + 1:
+                    self.logger.warning("Truncated domain length in UDP packet.")
+                    return
+                domain_len = data[offset]
+                offset += 1
+                if len(data) < offset + domain_len + 2:
+                    self.logger.warning("Truncated domain in UDP packet.")
+                    return
+                dst_addr = data[offset:offset + domain_len].decode(errors="replace")
+                offset += domain_len
+
+            elif atyp == 0x04:  # IPv6
+                if len(data) < offset + 16 + 2:
+                    self.logger.warning("Truncated IPv6 header in UDP packet.")
+                    return
+                dst_addr = socket.inet_ntop(socket.AF_INET6, data[offset:offset + 16])
+                offset += 16
+
+            else:
+                self.logger.warning(f"Unknown ATYP={atyp} in UDP packet.")
+                return
+
+            dst_port = struct.unpack("!H", data[offset:offset + 2])[0]
+            offset += 2
+
+            payload = data[offset:]
+            self.logger.debug(f"Client->Remote UDP: {len(payload)} bytes to {dst_addr}:{dst_port}")
+
+            if atyp == 0x03:
+                try:
+                    infos = socket.getaddrinfo(dst_addr, dst_port, type=socket.SOCK_DGRAM)
+                    # getaddrinfo: (family, type, proto, canonname, sockaddr)
+                    for fam, *_rest, sockaddr in infos:
+                        if fam in (socket.AF_INET, socket.AF_INET6):
+                            dst_addr = sockaddr[0]
+                            dst_port = sockaddr[1]
+                            break
+                except Exception as e:
+                    self.logger.warning(f"DNS resolve failed for {dst_addr}: {e}")
+                    return
+
+            try:
+                self.transport.sendto(payload, (dst_addr, dst_port))
+            except Exception as e:
+                self.logger.error(f"UDP sendto failed {dst_addr}:{dst_port}: {e}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to parse client UDP packet: {e}")
+
+    def handle_remote(self, payload: bytes, addr: Tuple[str, int]):
+        remote_ip, remote_port = addr
+        self.logger.debug(f"Remote->Client UDP: {len(payload)} bytes from {remote_ip}:{remote_port}")
+
+        # Собрать SOCKS5 UDP-заголовок для ответа клиенту
+        try:
+            ip_obj = None
+            atyp = 0x01
+            addr_bytes = b""
+            try:
+                ip_obj = socket.inet_pton(socket.AF_INET, remote_ip)
+                atyp = 0x01
+                addr_bytes = ip_obj
+            except OSError:
+                try:
+                    ip_obj6 = socket.inet_pton(socket.AF_INET6, remote_ip)
+                    atyp = 0x04
+                    addr_bytes = ip_obj6
+                except OSError:
+                    atyp = 0x03
+                    dom = remote_ip.encode("idna")
+                    if len(dom) > 255:
+                        dom = dom[:255]
+                    addr_bytes = bytes([len(dom)]) + dom
+
+            if atyp == 0x01:
+                header = struct.pack("!HBB4sH", 0, 0, atyp, addr_bytes, remote_port)
+            elif atyp == 0x04:
+                header = struct.pack("!HBB16sH", 0, 0, atyp, addr_bytes, remote_port)
+            else:  # domain
+                header = struct.pack("!HBB", 0, 0, atyp) + addr_bytes + struct.pack("!H", remote_port)
+
+            packet = header + payload
+
+            if self.client_addr:
+                self.transport.sendto(packet, self.client_addr)
+        except Exception as e:
+            self.logger.error(f"Failed to build SOCKS5 UDP reply: {e}")
 
     def error_received(self, exc):
         self.logger.error(f"Error received: {exc}")
 
     def connection_lost(self, exc):
         self.logger.info("UDP server closed")
+
+    def __str__(self):
+        return f'{self.__class__.__name__}(cipher={self.cipher})'
 
 
 class ConnectionMethods:
@@ -279,7 +401,7 @@ class ConnectionMethods:
         await client_writer.drain()
 
         try:
-            await client_reader.read() # Waiting for TCP connection close
+            await client_reader.read()
         except Exception as e:
             server.logger.warning(f"UDP_ASSOCIATE TCP connection error: {e}")
         finally:

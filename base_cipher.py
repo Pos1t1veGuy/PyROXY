@@ -85,7 +85,7 @@ class Cipher:
 
     @staticmethod
     async def server_auth_userpass(logins: Dict[str, str], reader: asyncio.StreamReader,
-                            writer: asyncio.StreamWriter) -> bool:
+                            writer: asyncio.StreamWriter) -> Optional[Tuple[str, str]]:
         auth_version = (await reader.readexactly(1))[0]
 
         if auth_version == 1:
@@ -98,12 +98,10 @@ class Cipher:
             if logins.get(username) == pw:
                 writer.write(bytes([1, 0]))
                 await writer.drain()
-                return True
+                return username, pw
             else:
                 writer.write(bytes([1, 1]))
                 await writer.drain()
-
-        return False
 
     @staticmethod
     async def client_auth_userpass(username: str, password: str, reader: asyncio.StreamReader,
@@ -214,27 +212,35 @@ class Cipher:
         )
 
     @staticmethod
-    async def client_connect_confirm(reader: asyncio.StreamReader) -> bool:
-        data = await reader.readexactly(4)
-        try:
-            if data[1] != 0x00:
-                raise ConnectionError(f"SOCKS5 CONNECT failed with code {data[1]:02x}")
-            atyp = data[3]
-        except IndexError:
-            raise ConnectionError(f'Invalid answer received {data}')
+    async def client_connect_confirm(reader: asyncio.StreamReader) -> Tuple[str, str]:
+        hdr = await reader.readexactly(4)
+        ver, rep, rsv, atyp = hdr
 
-        match atyp:
-            case 0x01:  # IPv4
-                address = await reader.readexactly(4 + 2)
-            case 0x03:  # Domain
-                domain_len = await reader.readexactly(1)[0]
-                address = await reader.readexactly(domain_len + 2)
-            case 0x04:  # IPv6
-                address = await reader.readexactly(16 + 2)
-            case _:
-                raise ConnectionError(f"Invalid address type: {atyp}")
+        if ver != 0x05:
+            raise ConnectionError(f"Invalid SOCKS version in reply: {ver}")
+        if rep != 0x00:
+            raise ConnectionError(f"SOCKS5 request failed, REP={rep}")
 
-        return True
+        if atyp == 0x01:  # IPv4
+            addr_bytes = await reader.readexactly(4)
+            port_bytes = await reader.readexactly(2)
+            address = socket.inet_ntoa(addr_bytes)
+
+        elif atyp == 0x03:  # Domain
+            domain_len = await reader.readexactly(1)[0]
+            addr_bytes = await reader.readexactly(domain_len)
+            port_bytes = await reader.readexactly(2)
+            address = addr_bytes.decode('idna')
+
+        elif atyp == 0x04:  # IPv6
+            addr_bytes = await reader.readexactly(16)
+            port_bytes = await reader.readexactly(2)
+            address = socket.inet_ntop(socket.AF_INET6, addr_bytes)
+
+        else:
+            raise ConnectionError(f"Invalid ATYP in reply: {atyp}")
+
+        return address, struct.unpack('!H', port_bytes)[0]
 
 
     @staticmethod

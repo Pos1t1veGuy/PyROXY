@@ -4,6 +4,7 @@ import hashlib
 import asyncio
 import struct
 import socket
+import math
 import ipaddress as ipa
 from Cryptodome.Cipher import AES
 from Cryptodome.Util import Counter
@@ -86,11 +87,10 @@ class AESCipherCTR(IVCipher):
         if logins.get(username) == password:
             writer.write(await self.encrypt(struct.pack("!BB", 1, 0)))
             await writer.drain()
-            return True
+            return username, password
         else:
             writer.write(await self.encrypt(struct.pack("!BB", 1, 1)))
             await writer.drain()
-            return False
 
     async def client_auth_userpass(self, username: str, password: str, reader: asyncio.StreamReader,
                                    writer: asyncio.StreamWriter) -> bool:
@@ -153,33 +153,34 @@ class AESCipherCTR(IVCipher):
             await super().server_make_reply(socks_version, reply_code, address=address, port=port)
         )
 
-    async def client_connect_confirm(self, reader: asyncio.StreamReader) -> bool:
-        header_encrypted = await reader.readexactly(4)
-        header = await self.decrypt(header_encrypted)
+    async def client_connect_confirm(self, reader: asyncio.StreamReader) -> Tuple[str, str]:
+        hdr = await self.decrypt(await reader.readexactly(4))
+        ver, rep, rsv, atyp = hdr
 
-        try:
-            ver, rep, _, atyp = header
-            if rep != 0x00:
-                raise ConnectionError(f"SOCKS5 CONNECT failed with code {rep:02x}")
-        except Exception:
-            raise ConnectionError(f"Invalid header received: {header}")
+        if ver != 0x05:
+            raise ConnectionError(f"Invalid SOCKS version in reply: {ver}")
+        if rep != 0x00:
+            raise ConnectionError(f"SOCKS5 request failed, REP={rep}")
 
         match atyp:
             case 0x01:  # IPv4
-                encrypted = await reader.readexactly(4 + 2)
-                _ = await self.decrypt(encrypted)
+                addr_port = await self.decrypt(await reader.readexactly(4 + 2))
+                addr_bytes, port_bytes = addr_port[:4], addr_port[4:]
+                address = socket.inet_ntoa(addr_bytes)
             case 0x03:  # Domain
                 len_byte = await reader.readexactly(1)
                 domain_len = await self.decrypt(len_byte)[0]
-                encrypted = await reader.readexactly(domain_len + 2)
-                _ = await self.decrypt(encrypted)
+                addr_port = await self.decrypt(await reader.readexactly(domain_len + 2))
+                addr_bytes, port_bytes = addr_port[:domain_len], addr_port[domain_len:]
+                address = addr_bytes.decode('idna')
             case 0x04:  # IPv6
-                encrypted = await reader.readexactly(16 + 2)
-                _ = await self.decrypt(encrypted)
+                addr_port = await self.decrypt(await reader.readexactly(16 + 2))
+                addr_bytes, port_bytes = addr_port[:16], addr_port[16:]
+                address = socket.inet_ntop(socket.AF_INET6, addr_bytes)
             case _:
-                raise ConnectionError(f"Invalid address type: {atyp}")
+                raise ConnectionError(f"Invalid ATYP in reply: {atyp}")
 
-        return True
+        return address, struct.unpack('!H', port_bytes)[0]
 
 
     async def encrypt(self, data: bytes) -> bytes:
@@ -242,11 +243,10 @@ class AESCipherCBC(AESCipherCTR):
         if logins.get(username) == password:
             writer.write(await self.encrypt(struct.pack("!BB", 1, 0)))
             await writer.drain()
-            return True
+            return username, password
         else:
             writer.write(await self.encrypt(struct.pack("!BB", 1, 1)))
             await writer.drain()
-            return False
 
     async def client_auth_userpass(self, username: str, password: str, reader: asyncio.StreamReader,
                                    writer: asyncio.StreamWriter) -> bool:
@@ -373,34 +373,39 @@ class AESCipherCBC(AESCipherCTR):
         )
         return await self.encrypt(first_header) + await self.encrypt(second_header)
 
-    async def client_connect_confirm(self, reader: asyncio.StreamReader) -> bool:
+    async def client_connect_confirm(self, reader: asyncio.StreamReader) -> Tuple[str, str]:
         header_encrypted = await reader.readexactly(AES.block_size)
         header = await self.decrypt(header_encrypted)
 
         try:
             ver, rep, _, atyp = header
+            if ver != 0x05:
+                raise ConnectionError(f"Invalid SOCKS version in reply: {ver}")
             if rep != 0x00:
-                raise ConnectionError(f"SOCKS5 CONNECT failed with code {rep:02x}")
+                raise ConnectionError(f"SOCKS5 CONNECT failed with code {rep}")
+
         except Exception:
             raise ConnectionError(f"Invalid header received: {header}")
 
         match atyp:
             case 0x01:  # IPv4
-                encrypted = await reader.readexactly(AES.block_size)
-                _ = await self.decrypt(encrypted)
+                addr_port = await self.decrypt(await reader.readexactly(AES.block_size))
+                addr_bytes, port_bytes = addr_port[:4], addr_port[4:6]
+                address = socket.inet_ntoa(addr_bytes)
             case 0x03:  # Domain
-                len_block = await reader.readexactly(AES.block_size)
-                domain_len = (await self.decrypt(len_block))[0]
+                domain_len = (await self.decrypt(await reader.readexactly(AES.block_size)))[0]
                 padded = ((total + AES.block_size - 1) // AES.block_size) * AES.block_size
-                encrypted = await reader.readexactly(padded)
-                _ = await self.decrypt(encrypted)
+                addr_port = await self.decrypt(await reader.readexactly(padded))
+                addr_bytes, port_bytes = addr_port[:domain_len], addr_port[domain_len:domain_len+2]
+                address = addr_bytes.decode('idna')
             case 0x04:  # IPv6
-                encrypted = await reader.readexactly(32)
-                _ = await self.decrypt(encrypted)
+                addr_port = await self.decrypt(await reader.readexactly(math.ceil(32 / AES.block_size)))
+                addr_bytes, port_bytes = addr_port[:16], addr_port[16:18]
+                address = socket.inet_ntop(socket.AF_INET6, addr_bytes)
             case _:
-                raise ConnectionError(f"Invalid address type: {atyp}")
+                raise ConnectionError(f"Invalid ATYP in reply: {atyp}")
 
-        return True
+        return address, struct.unpack('!H', port_bytes)[0]
 
 
     async def encrypt(self, data: bytes) -> bytes:

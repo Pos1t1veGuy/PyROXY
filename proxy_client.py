@@ -31,10 +31,8 @@ class Socks5Client:
         self._pt_buffer = bytearray()
         asyncio.set_event_loop(self._loop)
 
-    async def async_connect(self, target_host: str, target_port: int,
-                            proxy_host: str = '127.0.0.1', proxy_port: int = 1080,
-                            username: Optional[str] = None, password: Optional[str] = None):
-
+    async def handshake(self, proxy_host: str = '127.0.0.1', proxy_port: int = 1080,
+                        username: Optional[str] = None, password: Optional[str] = None):
         self.reader, self.writer = await asyncio.open_connection(proxy_host, proxy_port)
         self.logger.info(f"Connected to SOCKS5 proxy at {proxy_host}:{proxy_port}")
 
@@ -64,27 +62,55 @@ class Socks5Client:
         else:
             raise ConnectionError(f"Unsupported authentication method selected by proxy: {method_chosen}")
 
+    async def async_connect(self, target_host: str, target_port: int,
+                            proxy_host: str = '127.0.0.1', proxy_port: int = 1080,
+                            username: Optional[str] = None, password: Optional[str] = None):
+
+        await self.handshake(proxy_host=proxy_host, proxy_port=proxy_port, username=username, password=password)
+
         cmd_bytes = await self.cipher.client_command(
             self.socks_version, self.user_commands['connect'], target_host, target_port
         )
         await self.asend(cmd_bytes, encrypt=False, log_bytes=False)
-        connected = await self.cipher.client_connect_confirm(self.reader)
+        address, port = await self.cipher.client_connect_confirm(self.reader)
 
-        if connected:
-            self._host = target_host
-            self._port = target_port
-            self._proxy_host = proxy_host
-            self._proxy_port = proxy_port
-            self.connected = True
-            self.logger.info(f"Connected to {target_host}:{target_port} through proxy")
-        else:
-            self.logger.error(f'Failed to connect to {target_host}:{target_port} through proxy {host}:{port}')
-            await self.close()
+        self._host = target_host
+        self._port = target_port
+        self._proxy_host = proxy_host
+        self._proxy_port = proxy_port
+        self.connected = True
+        self.logger.info(f"Connected to {target_host}:{target_port} through proxy")
 
     def connect(self, target_host: str, target_port: int,
                 proxy_host: str = '127.0.0.1', proxy_port: int = 1080,
                 username: Optional[str] = None, password: Optional[str] = None):
         return self._loop.run_until_complete(self.async_connect(target_host, target_port,
+                                    proxy_host=proxy_host, proxy_port=proxy_port, username=username, password=password))
+
+    async def async_udp_associate(self, target_host: str, target_port: int,
+                            proxy_host: str = '127.0.0.1', proxy_port: int = 1080,
+                            username: Optional[str] = None, password: Optional[str] = None) -> Tuple[str, str]:
+
+        await self.handshake(proxy_host=proxy_host, proxy_port=proxy_port, username=username, password=password)
+
+        cmd_bytes = await self.cipher.client_command(
+            self.socks_version, self.user_commands['associate'], target_host, target_port
+        )
+        await self.asend(cmd_bytes, encrypt=False, log_bytes=False)
+
+        udp_host, udp_port = await self.cipher.client_connect_confirm(self.reader)
+
+        self._host = target_host
+        self._port = target_port
+        self._proxy_host = udp_host
+        self._proxy_port = udp_port
+
+        return udp_host, udp_port
+
+    def udp_associate(self, target_host: str, target_port: int,
+                proxy_host: str = '127.0.0.1', proxy_port: int = 1080,
+                username: Optional[str] = None, password: Optional[str] = None):
+        return self._loop.run_until_complete(self.async_udp_associate(target_host, target_port,
                                     proxy_host=proxy_host, proxy_port=proxy_port, username=username, password=password))
 
     async def asend(self, data: bytes, encrypt: bool = True, log_bytes: bool = True, wait: bool = True):
