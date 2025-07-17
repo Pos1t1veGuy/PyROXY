@@ -56,12 +56,38 @@ iv = os.urandom(16)
 client = Socks5Client(cipher=AESCipherCTR(key=key, iv=iv))
 client.connect('ifconfig.me', 80, username='u1', password='pw1')
 client.send(b"GET / HTTP/1.1\r\nHost: ifconfig.me\r\n\r\n")
-print(client.recv(512))
+print(client.read(-1))
 client.close()
 ```
 
 ---
 
+### 📖 Client read methods
+
+```python
+    async def aread(self, num_bytes: int = -1, decrypt: bool = True, log_bytes: bool = True, **kwargs) -> bytes:
+        # "num_bytes == -1" - means that aread will return every byte before the connection is closed
+        ...
+    def read(self, num_bytes: int = -1, **kwargs) -> bytes:
+        ...
+    async def areadexactly(self, num_bytes: int, decrypt: bool = True, log_bytes: bool = True, **kwargs) -> bytes:
+        ...
+    def readexactly(self, num_bytes: int, **kwargs) -> bytes:
+        ...
+    async def areaduntil(self, sep: Union[str, bytes] = '\n', decrypt: bool = True, log_bytes: bool = True,
+                         bytes_block: int = 1024, limit: int = 65535, **kwargs) -> bytes:
+        ...
+    def readuntil(self, **kwargs) -> bytes:
+        ...
+    async def areadline(self, log_bytes: bool = True, decrypt: bool = True, **kwargs) -> bytes:
+        ...
+    def readline(self, **kwargs) -> bytes:
+        ...
+```
+Here is async `a...` methods and sync. `**kwargs` is passed as an argument to the decryption function.
+Important note: block ciphers do not work well with tcp and the client must split the blocks itself.
+
+---
 
 ## 🔌 Custom Cipher & Handshake Override
 
