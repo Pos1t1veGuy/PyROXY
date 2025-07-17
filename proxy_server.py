@@ -31,8 +31,8 @@ class Socks5Server:
 
         self.user_commands_default = {
             0x01: ConnectionMethods.tcp_connection,
-            0x03: ConnectionMethods.bind_socket,
-            0x04: ConnectionMethods.udp_connection,
+            0x02: ConnectionMethods.bind_socket,
+            0x03: ConnectionMethods.udp_connection,
         }
         self.user_commands = self.user_commands_default if user_commands is None else user_commands
         self.asyncio_server = None
@@ -163,13 +163,3 @@ class ConnectionMethods:
                              client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> int:
         server.logger.info(f"udp_connection {addr}:{port}")
         return 0
-
-
-if __name__ == '__main__':
-    import hashlib
-    from ext.ciphers import AESCipherCTR
-    key = hashlib.sha256(b'my master key').digest()
-    SERVER = Socks5Server(users={
-        "u1": "pw1",
-    }, cipher=AESCipherCTR(key))
-    SERVER.start() # Доделать интеграцию с БД; Сделать пару шифраторов

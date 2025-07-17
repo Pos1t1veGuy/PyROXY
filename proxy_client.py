@@ -19,10 +19,11 @@ class Socks5Client:
 
         self.user_commands = {
             'connect': 0x01,
-            'bind': 0x03,
-            'associate': 0x04,
+            'bind': 0x02,
+            'associate': 0x03,
         }
         self._loop = asyncio.new_event_loop()
+        self._pt_buffer = bytearray()
         asyncio.set_event_loop(self._loop)
 
     async def async_connect(self, target_host: str, target_port: int,
@@ -76,24 +77,118 @@ class Socks5Client:
         return self._loop.run_until_complete(self.async_connect(target_host, target_port,
                                     proxy_host=proxy_host, proxy_port=proxy_port, username=username, password=password))
 
-    async def asend(self, data: bytes, encrypt: bool = True, log_bytes: bool = True):
+    async def asend(self, data: bytes, encrypt: bool = True, log_bytes: bool = True, wait: bool = True):
         data = await self.cipher.encrypt(data) if encrypt else data
         if self.log_bytes and log_bytes:
             self.bytes_sent += len(data)
         self.writer.write(data)
-        await self.writer.drain()
+        if wait:
+            await self.writer.drain()
 
     def send(self, data: bytes, encrypt: bool = True):
         return self._loop.run_until_complete(self.asend(data, encrypt=encrypt))
 
-    async def arecv(self, num_bytes: int, decrypt: bool = True, log_bytes: bool = True, **kwargs) -> bytes:
-        data = await self.reader.readexactly(num_bytes)
-        if self.log_bytes and log_bytes:
-            self.bytes_received += len(data)
-        return await self.cipher.decrypt(data, **kwargs) if decrypt else data
 
-    def recv(self, num_bytes: int, **kwargs):
-        return self._loop.run_until_complete(self.arecv(num_bytes, **kwargs))
+    async def aread(self, num_bytes: int = -1, decrypt: bool = True,
+                    log_bytes: bool = True, **kwargs) -> bytes:
+        # "num_bytes == -1" - means that aread will return every byte before the connection is closed
+
+        if num_bytes < -1 or num_bytes == 0:
+            return b''
+
+        buffer_length = len(self._pt_buffer)
+        if num_bytes == -1:
+            data = await self.reader.read(-1)
+            if self.log_bytes and log_bytes:
+                self.bytes_received += len(data)
+            data = self._pt_buffer + (await self.cipher.decrypt(data, **kwargs) if decrypt and data else data)
+            self._pt_buffer = bytearray()
+        elif num_bytes == buffer_length:
+            data = self._pt_buffer
+            self._pt_buffer = bytearray()
+        elif num_bytes > buffer_length:
+            data = await self.reader.read(num_bytes - buffer_length)
+            if self.log_bytes and log_bytes:
+                self.bytes_received += len(data)
+            data = self._pt_buffer + (await self.cipher.decrypt(data, **kwargs) if decrypt and data else data)
+            self._pt_buffer = bytearray()
+        else:
+            data = self._pt_buffer[:num_bytes]
+            del self._pt_buffer[:num_bytes]
+        return data
+
+    def read(self, num_bytes: int = -1, **kwargs) -> bytes:
+        return self._loop.run_until_complete(self.aread(num_bytes, **kwargs))
+
+    async def areadexactly(self, num_bytes: int, decrypt: bool = True, log_bytes: bool = True, **kwargs) -> bytes:
+        buffer_length = len(self._pt_buffer)
+        if num_bytes == buffer_length:
+            data = self._pt_buffer
+            self._pt_buffer = bytearray()
+        elif num_bytes > buffer_length:
+            data = await self.reader.readexactly(num_bytes - buffer_length)
+            if self.log_bytes and log_bytes:
+                self.bytes_received += len(data)
+            data = self._pt_buffer + (await self.cipher.decrypt(data, **kwargs) if decrypt else data)
+            self._pt_buffer = bytearray()
+        else:
+            data = self._pt_buffer[:num_bytes]
+            del self._pt_buffer[:num_bytes]
+        return data
+
+    def readexactly(self, num_bytes: int, **kwargs) -> bytes:
+        return self._loop.run_until_complete(self.areadexactly(num_bytes, **kwargs))
+
+    async def areaduntil(self, sep: Union[str, bytes] = '\n', decrypt: bool = True, log_bytes: bool = True,
+                         bytes_block: int = 1024, limit: int = 65535, **kwargs) -> bytes:
+        sep = sep.encode() if isinstance(sep, str) else sep
+
+        pos = self._pt_buffer.find(sep)
+        if pos != -1:
+            data = self._pt_buffer[:pos + len(sep)]
+            del self._pt_buffer[:pos + len(sep)]
+            return data
+
+        if not decrypt:
+            try:
+                data = await (self.reader.readline() if sep == b'\n' else self.reader.readuntil(sep))
+            except asyncio.IncompleteReadError as e:
+                data = e.partial
+            if self.log_bytes and log_bytes:
+                self.bytes_received += len(data)
+            return self._pt_buffer + data
+
+        while True:
+            chunk = await self.reader.read(bytes_block)
+            if not chunk:
+                break
+
+            if self.log_bytes and log_bytes:
+                self.bytes_received += len(chunk)
+
+            self._pt_buffer += await self.cipher.decrypt(chunk, **kwargs)
+
+            pos = self._pt_buffer.find(sep)
+            if pos != -1:
+                data = self._pt_buffer[:pos + len(sep)]
+                del self._pt_buffer[:pos + len(sep)]
+                return data
+
+        data = self._pt_buffer
+        self._pt_buffer = bytearray()
+        return data
+
+    def readuntil(self, **kwargs) -> bytes:
+        return self._loop.run_until_complete(self.areaduntil(**kwargs))
+
+    async def areadline(self, log_bytes: bool = True, decrypt: bool = True, **kwargs) -> bytes:
+        if 'sep' in kwargs.keys():
+            kwargs.pop('sep')
+        return await self.areaduntil(sep='\n', decrypt=decrypt, log_bytes=log_bytes, **kwargs)
+
+    def readline(self, **kwargs) -> bytes:
+        return self._loop.run_until_complete(self.areadline(**kwargs))
+
 
     async def async_close(self):
         if self.writer:
@@ -105,16 +200,3 @@ class Socks5Client:
         self._loop.run_until_complete(self.async_close())
         self._loop.stop()
         self._loop.close()
-
-
-if __name__ == '__main__':
-    from ext.basic_ciphers import AESCipherCTR
-
-    key = hashlib.sha256(b'my master key').digest()[:16]
-    iv = os.urandom(16)
-
-    client = Socks5Client(cipher=AESCipherCTR(key, iv))
-    client.connect('ifconfig.me', 80, username='u1', password='pw1')
-    client.send(b"GET / HTTP/1.1\r\nHost: ifconfig.me\r\n\r\n")
-    print(client.recv(512))
-    client.close()
