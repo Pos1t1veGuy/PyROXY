@@ -25,7 +25,6 @@ class Socks5Client:
             'bind': 0x02,
             'associate': 0x03,
         }
-        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._host = None
         self._port = None
         self._proxy_host = None
@@ -109,8 +108,6 @@ class Socks5Client:
         self._port = target_port
         self._proxy_host = proxy_host
         self._proxy_port = proxy_port
-        self._udp_proxy_host = udp_host
-        self._udp_proxy_port = udp_port
 
         return udp_host, udp_port
 
