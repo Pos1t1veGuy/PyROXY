@@ -244,11 +244,11 @@ class Cipher:
 
 
     @staticmethod
-    async def encrypt(data: bytes) -> bytes:
+    def encrypt(data: bytes) -> bytes:
         return data
 
     @staticmethod
-    async def decrypt(data: bytes) -> bytes:
+    def decrypt(data: bytes) -> bytes:
         return data
 
 

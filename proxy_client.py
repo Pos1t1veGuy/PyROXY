@@ -1,5 +1,6 @@
 from typing import *
 import asyncio
+import socket
 import logging
 
 from base_cipher import Cipher
@@ -7,9 +8,10 @@ import logger_setup
 
 
 class Socks5Client:
-    def __init__(self, cipher: Optional[Cipher] = None, log_bytes: bool = True):
+    def __init__(self, cipher: Optional[Cipher] = None, udp_cipher: Optional[Cipher] = None, log_bytes: bool = True):
         self.socks_version = 5
         self.cipher = Cipher if cipher is None else cipher
+        self.udp_cipher = Cipher if udp_cipher is None else udp_cipher
         self.log_bytes = log_bytes # only after handshake
         self.reader: Optional[asyncio.StreamReader] = None
         self.writer: Optional[asyncio.StreamWriter] = None
@@ -23,10 +25,13 @@ class Socks5Client:
             'bind': 0x02,
             'associate': 0x03,
         }
+        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._host = None
         self._port = None
         self._proxy_host = None
         self._proxy_port = None
+        self._udp_proxy_host = None
+        self._udp_proxy_port = None
         self._loop = asyncio.new_event_loop()
         self._pt_buffer = bytearray()
         asyncio.set_event_loop(self._loop)
@@ -102,8 +107,10 @@ class Socks5Client:
 
         self._host = target_host
         self._port = target_port
-        self._proxy_host = udp_host
-        self._proxy_port = udp_port
+        self._proxy_host = proxy_host
+        self._proxy_port = proxy_port
+        self._udp_proxy_host = udp_host
+        self._udp_proxy_port = udp_port
 
         return udp_host, udp_port
 
@@ -113,8 +120,9 @@ class Socks5Client:
         return self._loop.run_until_complete(self.async_udp_associate(target_host, target_port,
                                     proxy_host=proxy_host, proxy_port=proxy_port, username=username, password=password))
 
+
     async def asend(self, data: bytes, encrypt: bool = True, log_bytes: bool = True, wait: bool = True):
-        data = await self.cipher.encrypt(data) if encrypt else data
+        data = self.cipher.encrypt(data) if encrypt else data
         if self.log_bytes and log_bytes:
             self.bytes_sent += len(data)
         self.writer.write(data)
@@ -137,7 +145,7 @@ class Socks5Client:
             data = await self.reader.read(-1)
             if self.log_bytes and log_bytes:
                 self.bytes_received += len(data)
-            data = self._pt_buffer + (await self.cipher.decrypt(data, **kwargs) if decrypt and data else data)
+            data = self._pt_buffer + (self.cipher.decrypt(data, **kwargs) if decrypt and data else data)
             self._pt_buffer = bytearray()
         elif num_bytes == buffer_length:
             data = self._pt_buffer
@@ -146,7 +154,7 @@ class Socks5Client:
             data = await self.reader.read(num_bytes - buffer_length)
             if self.log_bytes and log_bytes:
                 self.bytes_received += len(data)
-            data = self._pt_buffer + (await self.cipher.decrypt(data, **kwargs) if decrypt and data else data)
+            data = self._pt_buffer + (self.cipher.decrypt(data, **kwargs) if decrypt and data else data)
             self._pt_buffer = bytearray()
         else:
             data = self._pt_buffer[:num_bytes]
@@ -165,7 +173,7 @@ class Socks5Client:
             data = await self.reader.readexactly(num_bytes - buffer_length)
             if self.log_bytes and log_bytes:
                 self.bytes_received += len(data)
-            data = self._pt_buffer + (await self.cipher.decrypt(data, **kwargs) if decrypt else data)
+            data = self._pt_buffer + (self.cipher.decrypt(data, **kwargs) if decrypt else data)
             self._pt_buffer = bytearray()
         else:
             data = self._pt_buffer[:num_bytes]
@@ -202,7 +210,7 @@ class Socks5Client:
             if self.log_bytes and log_bytes:
                 self.bytes_received += len(chunk)
 
-            self._pt_buffer += await self.cipher.decrypt(chunk, **kwargs)
+            self._pt_buffer += self.cipher.decrypt(chunk, **kwargs)
 
             pos = self._pt_buffer.find(sep)
             if pos != -1:
@@ -238,6 +246,15 @@ class Socks5Client:
         self._loop.stop()
         self._loop.close()
 
+    async def __aenter__(self):
+        return self
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.async_close()
+
+    def __enter__(self):
+        return self
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
     def __str__(self):
         connection = f'connected="{self._host}:{self._port}" proxy="{self._proxy_host}:{self._proxy_port}"'
