@@ -71,7 +71,10 @@ class Socks5Server:
                  user_white_list: Optional[Set[str]] = None,
                  users_black_list: Optional[Set[str]] = None,
                  cipher: Optional[Cipher] = None,
+                 udp_cipher: Optional[Cipher] = None,
+                 udp_server_timeout: int = 5*60,
                  users: Optional[Dict[str, str]] = None,
+                 user_commands: Optional[Dict[bytes, callable]] = None,
                  accept_anonymous: bool = False,
                  log_bytes: bool = True):
         ...

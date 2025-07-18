@@ -2,9 +2,16 @@ from typing import *
 import asyncio
 import logging
 import os
+import struct
+import socket
+import time
+import traceback
 
 import logger_setup
 from base_cipher import Cipher
+
+
+MAX_PAYLOAD_UDP = 65535
 
 
 class Socks5Server:
@@ -14,6 +21,7 @@ class Socks5Server:
                  users_black_list: Optional[Set[str]] = None,
                  cipher: Optional[Cipher] = None,
                  udp_cipher: Optional[Cipher] = None,
+                 udp_server_timeout: int = 5*60,
                  users: Optional[Dict[str, str]] = None,
                  user_commands: Optional[Dict[bytes, callable]] = None,
                  accept_anonymous: bool = False,
@@ -27,6 +35,7 @@ class Socks5Server:
         self.user_white_list = user_white_list
         self.users_black_list = users_black_list
         self.log_bytes = log_bytes # only after handshake
+        self.udp_server_timeout = udp_server_timeout
         self.cipher = Cipher if cipher is None else cipher
         self.udp_cipher = Cipher if udp_cipher is None else udp_cipher
         self.logger = logging.getLogger(__name__)
@@ -36,6 +45,7 @@ class Socks5Server:
         self.users = []
         self.bytes_sent = 0
         self.bytes_received = 0
+        self.stop = False
 
     async def async_start(self):
         try:
@@ -75,6 +85,7 @@ class Socks5Server:
                 if not auth_data:
                     self.logger.warning(f"Authentication failed {client_ip}:{client_port}")
                     return
+
                 user.username, user.password = auth_data
             elif methods['supports_no_auth'] and self.accept_anonymous:
                 data = await self.cipher.server_send_method_to_user(self.socks_version, 0x00)
@@ -90,7 +101,7 @@ class Socks5Server:
                 self.socks_version, self.user_commands, reader
             )
 
-            connection_result = await command(self, addr, port, reader, writer)
+            connection_result = await command(self, addr, port, user, reader, writer)
             self.logger.info(f'Сompleted the operation successfully, code: {connection_result}')
 
         # except Exception as e:
@@ -110,9 +121,9 @@ class Socks5Server:
                     self.bytes_received += len(data)
 
                 if decrypt:
-                    data = await decrypt(data)
+                    data = decrypt(data)
                 if encrypt:
-                    data = await encrypt(data)
+                    data = encrypt(data)
 
                 await self.send(writer, data)
         except Exception as e:
@@ -151,7 +162,8 @@ class Socks5Server:
         self.logger.info(f'{user} is disconnected')
 
     async def async_close(self):
-        self.logger.info("Shutting down server...")
+        self.stop = True
+        self.logger.info("Shutting down TCP server...")
         self.asyncio_server.close()
         await self.asyncio_server.wait_closed()
         self.logger.info("Server is closed")
@@ -209,41 +221,62 @@ class User:
         return f'{self.__class__.__name__}("{self.username}", id={self.id}, handshaked={self.handshaked}, address={address})'
 
 
-class UDPServerProxy(asyncio.DatagramProtocol): # TODO: timeout
-    def __init__(self, tcp_server: Socks5Server, client_writer: asyncio.StreamWriter):
+class UDPServerProxy(asyncio.DatagramProtocol):
+    def __init__(self, tcp_server: Socks5Server):
         self.tcp_server = tcp_server
-        self.cipher = self.tcp_server.udp_cipher # TODO: make udp cipher
-        self.client_writer = client_writer
+        self.cipher = self.tcp_server.udp_cipher
         self.logger = self.tcp_server.logger
+        self.timeout = self.tcp_server.udp_server_timeout
+
+        self.last_activity = time.time()
+        self.fragment_buffer = {}
+        self.host = None
+        self.port = None
         self.client_addr: Optional[Tuple[str, int]] = None
         self.transport = None
+        self.stop = False
 
     def connection_made(self, transport):
         self.transport = transport
-        self.logger.info(f"UDP server started on {transport.get_extra_info('sockname')}")
+        self.host, self.port = transport.get_extra_info('sockname')
+        self.last_activity = time.time()
+        self.logger.debug(f"UDP server started on {self.host}:{self.port}")
+        asyncio.create_task(self.monitor_timeout())
+
+    async def monitor_timeout(self):
+        while not self.stop:
+            await asyncio.sleep(1)
+            if time.time() - self.last_activity > self.timeout:
+                self.logger.debug("UDP timeout reached. Closing UDP server.")
+                self.transport.close()
+                self.stop = True
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]):
-        self.logger.info(f"UDP packet received from {addr}")
+        self.last_activity = time.time()
+        self.logger.debug(f"UDP packet received from {addr}")
 
-        if self.client_addr is None:
-            self.client_addr = addr
+        try:
+            if self.client_addr is None:
+                self.client_addr = addr
 
-        if addr == self.client_addr:
-            self.handle_client(data, addr)
-        else:
-            self.handle_remote(data, addr)
+            if len(data) <= MAX_PAYLOAD_UDP:
+                if addr == self.client_addr:
+                    self.handle_client(data, addr)
+                else:
+                    self.handle_remote(data, addr)
+
+        except Exception as ex:
+            self.logger.error(f'UDP server error, shutting down...')
+            self.transport.close()
 
     def handle_client(self, data: bytes, addr: Tuple[str, int]):
         try:
+            data = self.cipher.decrypt(data)
             if len(data) < 4:
                 self.logger.warning("UDP packet too short for SOCKS5 header.")
                 return
 
             rsv, frag, atyp = struct.unpack("!HBB", data[:4])
-            if rsv != 0 or frag != 0:
-                # TODO: make fragmentation
-                self.logger.warning(f"Unsupported fragmentation (FRAG={frag}) or bad RSV={rsv}. Dropping.")
-                return
 
             offset = 4
             if atyp == 0x01:  # IPv4
@@ -295,10 +328,22 @@ class UDPServerProxy(asyncio.DatagramProtocol): # TODO: timeout
                     self.logger.warning(f"DNS resolve failed for {dst_addr}: {e}")
                     return
 
-            try:
-                self.transport.sendto(payload, (dst_addr, dst_port))
-            except Exception as e:
-                self.logger.error(f"UDP sendto failed {dst_addr}:{dst_port}: {e}")
+            if 0 < frag < 128:
+                self.fragment_buffer[frag] = payload
+            elif frag == 0:
+                keys = list(sorted(self.fragment_buffer.keys()))
+                if self.fragment_buffer:
+                    if keys == list(range(keys[0], keys[-1]+1)):
+                        payload = b''.join(self.fragment_buffer[i] for i in keys) + payload
+                    else:
+                        self.logger.warning(f"Lost some packet from fragments, fragments was ignored")
+
+                self.fragment_buffer = {}
+
+                try:
+                    self.transport.sendto(payload, (dst_addr, dst_port))
+                except Exception as e:
+                    self.logger.error(f"UDP sendto failed {dst_addr}:{dst_port}: {e}")
 
         except Exception as e:
             self.logger.error(f"Failed to parse client UDP packet: {e}")
@@ -307,7 +352,6 @@ class UDPServerProxy(asyncio.DatagramProtocol): # TODO: timeout
         remote_ip, remote_port = addr
         self.logger.debug(f"Remote->Client UDP: {len(payload)} bytes from {remote_ip}:{remote_port}")
 
-        # Собрать SOCKS5 UDP-заголовок для ответа клиенту
         try:
             ip_obj = None
             atyp = 0x01
@@ -338,7 +382,8 @@ class UDPServerProxy(asyncio.DatagramProtocol): # TODO: timeout
             packet = header + payload
 
             if self.client_addr:
-                self.transport.sendto(packet, self.client_addr)
+                self.transport.sendto(self.cipher.encrypt(packet), self.client_addr)
+
         except Exception as e:
             self.logger.error(f"Failed to build SOCKS5 UDP reply: {e}")
 
@@ -346,15 +391,17 @@ class UDPServerProxy(asyncio.DatagramProtocol): # TODO: timeout
         self.logger.error(f"Error received: {exc}")
 
     def connection_lost(self, exc):
-        self.logger.info("UDP server closed")
+        self.stop = True
+        self.logger.info(f"UDP transport closed: {exc}")
 
     def __str__(self):
-        return f'{self.__class__.__name__}(cipher={self.cipher})'
+        host_port = f"{self.host}:{self.port}, " if self.host and self.port else ""
+        return f'{self.__class__.__name__}({host_port}cipher={self.cipher})'
 
 
 class ConnectionMethods:
     @staticmethod
-    async def CONNECT(server: Socks5Server, addr: str, port: int,
+    async def CONNECT(server: Socks5Server, addr: str, port: int, user: User,
                              client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> int:
         server.logger.info(f"Establishing TCP connection to {addr}:{port}...")
 
@@ -377,33 +424,57 @@ class ConnectionMethods:
         return 0
 
     @staticmethod
-    async def BIND(server: Socks5Server, addr: str, port: int,
+    async def BIND(server: Socks5Server, addr: str, port: int, user: User,
                           client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> int:
         server.logger.info(f"bind_socket {addr}:{port}")
         return 0
 
     @staticmethod
-    async def UDP_ASSOCIATE(server: Socks5Server, addr: str, port: int,
+    async def UDP_ASSOCIATE(server: Socks5Server, addr: str, port: int, user: User,
                              client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> int:
         server.logger.info(f"Starting UDP server for {addr}:{port}")
         loop = asyncio.get_running_loop()
 
-        transport, protocol = await loop.create_datagram_endpoint(
-            lambda: UDPServerProxy(server, client_writer),
-            local_addr=('0.0.0.0', 0) # 0 - random OS port
-        )
-        udp_host, udp_port = transport.get_extra_info('sockname')
+        try:
+            transport, protocol = await loop.create_datagram_endpoint(
+                lambda: UDPServerProxy(server),
+                local_addr=('0.0.0.0', 0)
+            )
+        except Exception as e:
+            server.logger.error(f"Failed to start UDP relay: {e}")
+            reply = await server.cipher.server_make_reply(server.socks_version, 0x01, '0.0.0.0', 0)
+            client_writer.write(reply)
+            await client_writer.drain()
+            return 1
 
-        server.logger.info(f"UDP server listening on {udp_host}:{udp_port}")
+        udp_host, udp_port = transport.get_extra_info('sockname')
+        udp_host = '127.0.0.1' if udp_host == '0.0.0.0' else udp_host
 
         reply = await server.cipher.server_make_reply(server.socks_version, 0x00, udp_host, udp_port)
         client_writer.write(reply)
         await client_writer.drain()
 
         try:
-            await client_reader.read()
-        except Exception as e:
-            server.logger.warning(f"UDP_ASSOCIATE TCP connection error: {e}")
+            while True:
+                try:
+                    if server.stop:
+                        server.logger.debug("Server stopping: closing UDP assoc.")
+                        break
+                    if not user.connected:
+                        server.logger.debug("User disconnected: closing UDP assoc.")
+                        break
+
+                    if client_reader.at_eof():
+                        server.logger.debug("TCP reader EOF: closing UDP assoc.")
+                        break
+                    if client_writer.is_closing():
+                        server.logger.debug("TCP writer closing: closing UDP assoc.")
+                        break
+
+                    await asyncio.sleep(.5)
+                except Exception as e:
+                    server.logger.warning(f"UDP_ASSOCIATE TCP connection error: {e}")
+                    break
         finally:
             transport.close()
             server.logger.info("UDP server closed")

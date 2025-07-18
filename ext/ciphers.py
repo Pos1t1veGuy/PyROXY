@@ -10,7 +10,7 @@ from Cryptodome.Cipher import AES
 from Cryptodome.Util import Counter
 from Cryptodome.Util.Padding import pad, unpad
 
-from ..base_cipher import Cipher, IVCipher
+from ..base_cipher import IVCipher
 
 
 class AESCipherCTR(IVCipher):
@@ -34,24 +34,30 @@ class AESCipherCTR(IVCipher):
 
         methods_bytes = struct.pack(f"!{len(methods)}B", *methods)
 
-        encrypted_header = await self.encrypt(header)
-        encrypted_methods = await self.encrypt(methods_bytes)
+        encrypted_header = self.encrypt(header)
+        encrypted_methods = self.encrypt(methods_bytes)
 
+        # print('iv', self.iv)
+        print('client', header)
+        print('client', encrypted_header)
         return self.iv + encrypted_header + encrypted_methods
 
     async def server_get_methods(self, socks_version: int, reader: asyncio.StreamReader) -> Dict[str, bool]:
         iv = await reader.readexactly(16)
         self._init_ciphers(iv)
+        # print('iv', self.iv)
 
-        encrypted_header = await reader.readexactly(2)
-        decrypted_header = await self.decrypt(encrypted_header)
-        version, nmethods = decrypted_header
+        v, nm = await reader.readexactly(1), await reader.readexactly(1)
+        print('server', v, nm)
+        version = self.decrypt(v)[0]
+        nmethods = self.decrypt(nm)[0]
+        print('server', version, nmethods)
 
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
 
         encrypted_methods = await reader.readexactly(nmethods)
-        methods = await self.decrypt(encrypted_methods)
+        methods = self.decrypt(encrypted_methods)
 
         return {
             'supports_no_auth': 0x00 in methods,
@@ -59,10 +65,11 @@ class AESCipherCTR(IVCipher):
         }
 
     async def server_send_method_to_user(self, socks_version: int, method: int) -> bytes:
-        return await self.encrypt(struct.pack("!BB", socks_version, method))
+        return self.encrypt(struct.pack("!BB", socks_version, method))
 
     async def client_get_method(self, reader: asyncio.StreamReader) -> int:
-        decrypted_response = await self.decrypt(await reader.readexactly(2))
+        enc = await reader.readexactly(2)
+        decrypted_response = self.decrypt(enc)
         version, method = struct.unpack("!BB", decrypted_response)
 
         if method == 0xFF:
@@ -73,23 +80,23 @@ class AESCipherCTR(IVCipher):
     async def server_auth_userpass(self, logins: Dict[str, str], reader: asyncio.StreamReader,
                                    writer: asyncio.StreamWriter) -> bool:
         encrypted_header = await reader.readexactly(2)
-        version, ulen = struct.unpack("!BB", await self.decrypt(encrypted_header))
+        version, ulen = struct.unpack("!BB", self.decrypt(encrypted_header))
 
         username = await reader.readexactly(ulen)
-        username = (await self.decrypt(username)).decode()
+        username = (self.decrypt(username)).decode()
 
         plen_encrypted = await reader.readexactly(1)
-        plen = (await self.decrypt(plen_encrypted))[0]
+        plen = (self.decrypt(plen_encrypted))[0]
 
         password = (await reader.readexactly(plen))
-        password = (await self.decrypt(password)).decode()
+        password = (self.decrypt(password)).decode()
 
         if logins.get(username) == password:
-            writer.write(await self.encrypt(struct.pack("!BB", 1, 0)))
+            writer.write(self.encrypt(struct.pack("!BB", 1, 0)))
             await writer.drain()
             return username, password
         else:
-            writer.write(await self.encrypt(struct.pack("!BB", 1, 1)))
+            writer.write(self.encrypt(struct.pack("!BB", 1, 1)))
             await writer.drain()
 
     async def client_auth_userpass(self, username: str, password: str, reader: asyncio.StreamReader,
@@ -97,14 +104,14 @@ class AESCipherCTR(IVCipher):
         username_bytes = username.encode()
         password_bytes = password.encode()
 
-        writer.write(await self.encrypt(struct.pack("!BB", 1, len(username_bytes))))
-        writer.write(await self.encrypt(username_bytes))
-        writer.write(await self.encrypt(bytes([len(password_bytes)])))
-        writer.write(await self.encrypt(password_bytes))
+        writer.write(self.encrypt(struct.pack("!BB", 1, len(username_bytes))))
+        writer.write(self.encrypt(username_bytes))
+        writer.write(self.encrypt(bytes([len(password_bytes)])))
+        writer.write(self.encrypt(password_bytes))
         await writer.drain()
 
         response = await reader.readexactly(2)
-        version, status = struct.unpack("!BB", await self.decrypt(response))
+        version, status = struct.unpack("!BB", self.decrypt(response))
 
         if status != 0:
             raise ConnectionError("Authentication failed")
@@ -112,12 +119,12 @@ class AESCipherCTR(IVCipher):
         return True
 
     async def client_command(self, socks_version: int, user_command: int, target_host: str, target_port: int) -> bytes:
-        return await self.encrypt(await super().client_command(socks_version, user_command, target_host, target_port))
+        return self.encrypt(await super().client_command(socks_version, user_command, target_host, target_port))
 
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
                                     reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:
 
-        version, cmd, rsv, address_type = await self.decrypt(await reader.readexactly(4))
+        version, cmd, rsv, address_type = self.decrypt(await reader.readexactly(4))
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
 
@@ -128,18 +135,18 @@ class AESCipherCTR(IVCipher):
         match address_type:
             case 0x01:  # IPv4
                 encrypted = await reader.readexactly(4 + 2)
-                data = await self.decrypt(encrypted)
+                data = self.decrypt(encrypted)
                 addr = '.'.join(map(str, data[:4]))
                 port = int.from_bytes(data[4:], 'big')
 
             case 0x03:  # domain
-                domain_len = (await self.decrypt(await reader.readexactly(1)))[0]
-                data = await self.decrypt(await reader.readexactly(domain_len + 2))
+                domain_len = (self.decrypt(await reader.readexactly(1)))[0]
+                data = self.decrypt(await reader.readexactly(domain_len + 2))
                 addr = data[:domain_len].decode()
                 port = int.from_bytes(data[domain_len:], 'big')
 
             case 0x04:  # IPv6
-                data = await self.decrypt(await reader.readexactly(16 + 2))
+                data = self.decrypt(await reader.readexactly(16 + 2))
                 addr = socket.inet_ntop(socket.AF_INET6, data[:16])
                 port = int.from_bytes(data[16:], 'big')
 
@@ -149,12 +156,12 @@ class AESCipherCTR(IVCipher):
         return addr, port, cmd
 
     async def server_make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> bytes:
-        return await self.encrypt(
+        return self.encrypt(
             await super().server_make_reply(socks_version, reply_code, address=address, port=port)
         )
 
     async def client_connect_confirm(self, reader: asyncio.StreamReader) -> Tuple[str, str]:
-        hdr = await self.decrypt(await reader.readexactly(4))
+        hdr = self.decrypt(await reader.readexactly(4))
         ver, rep, rsv, atyp = hdr
 
         if ver != 0x05:
@@ -164,17 +171,17 @@ class AESCipherCTR(IVCipher):
 
         match atyp:
             case 0x01:  # IPv4
-                addr_port = await self.decrypt(await reader.readexactly(4 + 2))
+                addr_port = self.decrypt(await reader.readexactly(4 + 2))
                 addr_bytes, port_bytes = addr_port[:4], addr_port[4:]
                 address = socket.inet_ntoa(addr_bytes)
             case 0x03:  # Domain
                 len_byte = await reader.readexactly(1)
-                domain_len = await self.decrypt(len_byte)[0]
-                addr_port = await self.decrypt(await reader.readexactly(domain_len + 2))
+                domain_len = self.decrypt(len_byte)[0]
+                addr_port = self.decrypt(await reader.readexactly(domain_len + 2))
                 addr_bytes, port_bytes = addr_port[:domain_len], addr_port[domain_len:]
                 address = addr_bytes.decode('idna')
             case 0x04:  # IPv6
-                addr_port = await self.decrypt(await reader.readexactly(16 + 2))
+                addr_port = self.decrypt(await reader.readexactly(16 + 2))
                 addr_bytes, port_bytes = addr_port[:16], addr_port[16:]
                 address = socket.inet_ntop(socket.AF_INET6, addr_bytes)
             case _:
@@ -183,11 +190,17 @@ class AESCipherCTR(IVCipher):
         return address, struct.unpack('!H', port_bytes)[0]
 
 
-    async def encrypt(self, data: bytes) -> bytes:
-        return self.encryptor.encrypt(data)
+    def encrypt(self, data: bytes) -> bytes:
+        if not self.encryptor is None:
+            return self.encryptor.encrypt(data)
+        else:
+            raise OSError(f'{self.__class__.__name__} needs to specify IV (init vector) in constructor or handshake')
 
-    async def decrypt(self, data: bytes) -> bytes:
-        return self.decryptor.decrypt(data)
+    def decrypt(self, data: bytes) -> bytes:
+        if not self.encryptor is None:
+            return self.decryptor.decrypt(data)
+        else:
+            raise OSError(f'{self.__class__.__name__} needs to specify IV (init vector) in constructor or handshake')
 
 
 class AESCipherCBC(AESCipherCTR):
@@ -201,7 +214,7 @@ class AESCipherCBC(AESCipherCTR):
         self._init_ciphers(iv)
 
         encrypted_header = await reader.readexactly(AES.block_size)
-        decrypted_header = await self.decrypt(encrypted_header)
+        decrypted_header = self.decrypt(encrypted_header)
         version, nmethods = decrypted_header
 
         if version != socks_version:
@@ -209,7 +222,7 @@ class AESCipherCBC(AESCipherCTR):
 
         padded_len = ((nmethods + AES.block_size - 1) // AES.block_size) * AES.block_size
         encrypted_methods = await reader.readexactly(padded_len)
-        methods = await self.decrypt(encrypted_methods)
+        methods = self.decrypt(encrypted_methods)
 
         return {
             'supports_no_auth': 0x00 in methods,
@@ -217,7 +230,7 @@ class AESCipherCBC(AESCipherCTR):
         }
 
     async def client_get_method(self, reader: asyncio.StreamReader) -> int:
-        decrypted_response = await self.decrypt(await reader.readexactly(AES.block_size))
+        decrypted_response = self.decrypt(await reader.readexactly(AES.block_size))
         version, method = struct.unpack("!BB", decrypted_response[:2])
 
         if method == 0xFF:
@@ -227,25 +240,25 @@ class AESCipherCBC(AESCipherCTR):
 
     async def server_auth_userpass(self, logins: Dict[str, str], reader: asyncio.StreamReader,
                                    writer: asyncio.StreamWriter) -> bool:
-        header = await self.decrypt(await reader.readexactly(AES.block_size))
+        header = self.decrypt(await reader.readexactly(AES.block_size))
         version, ulen = struct.unpack("!BB", header[:2])
 
         padded_ulen = ((ulen + AES.block_size - 1) // AES.block_size) * AES.block_size
-        username = await self.decrypt(await reader.readexactly(padded_ulen))
+        username = self.decrypt(await reader.readexactly(padded_ulen))
         username = username[:ulen].decode()
 
-        plen = (await self.decrypt(await reader.readexactly(AES.block_size)))[0]
+        plen = (self.decrypt(await reader.readexactly(AES.block_size)))[0]
 
         padded_plen = ((plen + AES.block_size - 1) // AES.block_size) * AES.block_size
-        decrypted_password = await self.decrypt(await reader.readexactly(padded_plen))
+        decrypted_password = self.decrypt(await reader.readexactly(padded_plen))
         password = decrypted_password[:plen].decode()
 
         if logins.get(username) == password:
-            writer.write(await self.encrypt(struct.pack("!BB", 1, 0)))
+            writer.write(self.encrypt(struct.pack("!BB", 1, 0)))
             await writer.drain()
             return username, password
         else:
-            writer.write(await self.encrypt(struct.pack("!BB", 1, 1)))
+            writer.write(self.encrypt(struct.pack("!BB", 1, 1)))
             await writer.drain()
 
     async def client_auth_userpass(self, username: str, password: str, reader: asyncio.StreamReader,
@@ -253,13 +266,13 @@ class AESCipherCBC(AESCipherCTR):
         username_bytes = username.encode()
         password_bytes = password.encode()
 
-        writer.write(await self.encrypt(struct.pack("!BB", 1, len(username_bytes))))
-        writer.write(await self.encrypt(username_bytes))
-        writer.write(await self.encrypt(bytes([len(password_bytes)])))
-        writer.write(await self.encrypt(password_bytes))
+        writer.write(self.encrypt(struct.pack("!BB", 1, len(username_bytes))))
+        writer.write(self.encrypt(username_bytes))
+        writer.write(self.encrypt(bytes([len(password_bytes)])))
+        writer.write(self.encrypt(password_bytes))
         await writer.drain()
 
-        response = await self.decrypt(await reader.readexactly(AES.block_size))
+        response = self.decrypt(await reader.readexactly(AES.block_size))
         version, status = struct.unpack("!BB", response)
 
         if status != 0:
@@ -286,17 +299,17 @@ class AESCipherCBC(AESCipherCTR):
                 raise ValueError("Domain name too long for SOCKS5")
             length = len(addr_bytes)
 
-        first_block = await self.encrypt(
+        first_block = self.encrypt(
             struct.pack("!BBBBB", socks_version, user_command, 0x00, atyp, length)
         )
-        second_block = await self.encrypt(addr_bytes + struct.pack("!H", target_port))
+        second_block = self.encrypt(addr_bytes + struct.pack("!H", target_port))
         return first_block + second_block
 
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
                                         reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:
 
         header_raw = await reader.readexactly(16)
-        header = await self.decrypt(header_raw)
+        header = self.decrypt(header_raw)
         version, cmd, rsv, address_type, length = struct.unpack("!BBBBB", header[:5])
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
@@ -308,19 +321,19 @@ class AESCipherCBC(AESCipherCTR):
         match address_type:
             case 0x01:  # IPv4
                 encrypted = await reader.readexactly(16)
-                data = await self.decrypt(encrypted)
+                data = self.decrypt(encrypted)
                 addr = '.'.join(map(str, data[:4]))
                 port = int.from_bytes(data[4:], 'big')
 
             case 0x03:  # domain
                 total_len = length + 2
                 padded_len = ((total_len + 15) // 16) * 16
-                data = await self.decrypt(await reader.readexactly(padded_len))
+                data = self.decrypt(await reader.readexactly(padded_len))
                 addr = data[:length].decode()
                 port = int.from_bytes(data[length:], 'big')
 
             case 0x04:  # IPv6
-                data = await self.decrypt(await reader.readexactly(16 + 2))
+                data = self.decrypt(await reader.readexactly(16 + 2))
                 addr = socket.inet_ntop(socket.AF_INET6, data[:16])
                 port = int.from_bytes(data[16:], 'big')
 
@@ -371,11 +384,11 @@ class AESCipherCBC(AESCipherCTR):
             addr_data,
             port
         )
-        return await self.encrypt(first_header) + await self.encrypt(second_header)
+        return self.encrypt(first_header) + self.encrypt(second_header)
 
     async def client_connect_confirm(self, reader: asyncio.StreamReader) -> Tuple[str, str]:
         header_encrypted = await reader.readexactly(AES.block_size)
-        header = await self.decrypt(header_encrypted)
+        header = self.decrypt(header_encrypted)
 
         try:
             ver, rep, _, atyp = header
@@ -389,17 +402,17 @@ class AESCipherCBC(AESCipherCTR):
 
         match atyp:
             case 0x01:  # IPv4
-                addr_port = await self.decrypt(await reader.readexactly(AES.block_size))
+                addr_port = self.decrypt(await reader.readexactly(AES.block_size))
                 addr_bytes, port_bytes = addr_port[:4], addr_port[4:6]
                 address = socket.inet_ntoa(addr_bytes)
             case 0x03:  # Domain
-                domain_len = (await self.decrypt(await reader.readexactly(AES.block_size)))[0]
+                domain_len = (self.decrypt(await reader.readexactly(AES.block_size)))[0]
                 padded = ((total + AES.block_size - 1) // AES.block_size) * AES.block_size
-                addr_port = await self.decrypt(await reader.readexactly(padded))
+                addr_port = self.decrypt(await reader.readexactly(padded))
                 addr_bytes, port_bytes = addr_port[:domain_len], addr_port[domain_len:domain_len+2]
                 address = addr_bytes.decode('idna')
             case 0x04:  # IPv6
-                addr_port = await self.decrypt(await reader.readexactly(math.ceil(32 / AES.block_size)))
+                addr_port = self.decrypt(await reader.readexactly(math.ceil(32 / AES.block_size)))
                 addr_bytes, port_bytes = addr_port[:16], addr_port[16:18]
                 address = socket.inet_ntop(socket.AF_INET6, addr_bytes)
             case _:
@@ -408,11 +421,17 @@ class AESCipherCBC(AESCipherCTR):
         return address, struct.unpack('!H', port_bytes)[0]
 
 
-    async def encrypt(self, data: bytes) -> bytes:
-        padded = pad(data, AES.block_size)
-        res = self.encryptor.encrypt(padded)
-        return res
+    def encrypt(self, data: bytes) -> bytes:
+        if not self.encryptor is None:
+            padded = pad(data, AES.block_size)
+            res = self.encryptor.encrypt(padded)
+            return res
+        else:
+            raise OSError(f'{self.__class__.__name__} needs to specify IV (init vector) in constructor or handshake')
 
-    async def decrypt(self, data: bytes, padded: bool = True) -> bytes:
-        decrypted = self.decryptor.decrypt(data)
-        return unpad(decrypted, AES.block_size) if padded else decrypted
+    def decrypt(self, data: bytes) -> bytes:
+        if not self.decryptor is None:
+            decrypted = self.decryptor.decrypt(data)
+            return unpad(decrypted, AES.block_size)
+        else:
+            raise OSError(f'{self.__class__.__name__} needs to specify IV (init vector) in constructor or handshake')
