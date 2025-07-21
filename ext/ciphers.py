@@ -37,21 +37,15 @@ class AESCipherCTR(IVCipher):
         encrypted_header = self.encrypt(header)
         encrypted_methods = self.encrypt(methods_bytes)
 
-        # print('iv', self.iv)
-        print('client', header)
-        print('client', encrypted_header)
         return self.iv + encrypted_header + encrypted_methods
 
     async def server_get_methods(self, socks_version: int, reader: asyncio.StreamReader) -> Dict[str, bool]:
         iv = await reader.readexactly(16)
         self._init_ciphers(iv)
-        # print('iv', self.iv)
 
         v, nm = await reader.readexactly(1), await reader.readexactly(1)
-        print('server', v, nm)
         version = self.decrypt(v)[0]
         nmethods = self.decrypt(nm)[0]
-        print('server', version, nmethods)
 
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
