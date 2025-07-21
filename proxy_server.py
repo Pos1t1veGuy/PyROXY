@@ -432,7 +432,6 @@ class ConnectionMethods:
     @staticmethod
     async def UDP_ASSOCIATE(server: Socks5Server, addr: str, port: int, user: User,
                              client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> int:
-        server.logger.info(f"Starting UDP server for {addr}:{port}")
         loop = asyncio.get_running_loop()
 
         try:
@@ -449,6 +448,7 @@ class ConnectionMethods:
 
         udp_host, udp_port = transport.get_extra_info('sockname')
         udp_host = '127.0.0.1' if udp_host == '0.0.0.0' else udp_host
+        server.logger.info(f"Started UDP server for {addr}:{port} at {udp_host}:{udp_port}")
 
         reply = await server.cipher.server_make_reply(server.socks_version, 0x00, udp_host, udp_port)
         client_writer.write(reply)

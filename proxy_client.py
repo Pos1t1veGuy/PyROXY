@@ -2,17 +2,20 @@ from typing import *
 import asyncio
 import socket
 import logging
+import ipaddress
+import struct
 
 from base_cipher import Cipher
 import logger_setup
 
 
 class Socks5Client:
-    def __init__(self, cipher: Optional[Cipher] = None, udp_cipher: Optional[Cipher] = None, log_bytes: bool = True):
+    def __init__(self, cipher: Optional[Cipher] = None, udp_cipher: Optional[Cipher] = None,  log_bytes: bool = True):
         self.socks_version = 5
         self.cipher = Cipher if cipher is None else cipher
         self.udp_cipher = Cipher if udp_cipher is None else udp_cipher
         self.log_bytes = log_bytes # only after handshake
+        self.udp_socket = None
         self.reader: Optional[asyncio.StreamReader] = None
         self.writer: Optional[asyncio.StreamWriter] = None
         self.connected = False
@@ -106,8 +109,11 @@ class Socks5Client:
 
         self._host = target_host
         self._port = target_port
+        self._udp_proxy_host = udp_host
+        self._udp_proxy_port = udp_port
         self._proxy_host = proxy_host
         self._proxy_port = proxy_port
+        self.udp_socket = await self._get_udp_socket(udp_host, udp_port)
 
         return udp_host, udp_port
 
@@ -116,6 +122,15 @@ class Socks5Client:
                 username: Optional[str] = None, password: Optional[str] = None):
         return self._loop.run_until_complete(self.async_udp_associate(target_host, target_port,
                                     proxy_host=proxy_host, proxy_port=proxy_port, username=username, password=password))
+
+    async def _get_udp_socket(self, udp_host: str, udp_port: int) -> 'UDPClient':
+        loop = asyncio.get_running_loop()
+        transport, protocol = await loop.create_datagram_endpoint(
+            lambda: UDPClient(),
+            remote_addr=(udp_host, udp_port)
+        )
+        protocol._transport = transport
+        return protocol
 
 
     async def asend(self, data: bytes, encrypt: bool = True, log_bytes: bool = True, wait: bool = True):
@@ -231,6 +246,48 @@ class Socks5Client:
         return self._loop.run_until_complete(self.areadline(**kwargs))
 
 
+    async def udp_send(self, data: bytes):
+        return self.udp_send(data)
+
+    def udp_send(self, data: bytes):
+        if self.udp_socket:
+            header_socks5 = self.format_socks5_udp_header(self._udp_proxy_host, self._udp_proxy_port)
+            self.udp_socket.send(self.udp_cipher.encrypt(header_socks5 + data))
+        else:
+            raise ConnectionError(
+        f'The client should have connected to the SOCKS5 proxy and executed the UDP ASSOCIATE command, but did not do so'
+            )
+
+    async def async_udp_recv(self, timeout: int = 5) -> Tuple[bytes, Tuple[str, int]]:
+        data = await asyncio.wait_for(self.udp_socket.recv(), timeout=timeout)
+        return self.udp_cipher.decrypt(data[0]), data[1]
+
+    def udp_recv(self, timeout: int = 5) -> Tuple[bytes, Tuple[str, int]]:
+        return self._loop.run_until_complete(self.udp_recv(timeout=timeout))
+
+
+    def format_socks5_udp_header(self, host: str, port: int) -> bytes:
+        rsv = 0
+        frag = 0
+
+        try: # IPv(4/6)
+            ip = ipaddress.ip_address(host)
+            if ip.version == 4:
+                atyp = 1  # IPv4
+                addr_bytes = ip.packed  # 4 байта
+            else:
+                atyp = 4  # IPv6
+                addr_bytes = ip.packed  # 16 байт
+        except ValueError:
+            atyp = 3  # Domain
+            host_bytes = host.encode("idna")
+            if len(host_bytes) > 255:
+                raise ValueError("Domain name too long for SOCKS5 (max 255 bytes)")
+            addr_bytes = bytes([len(host_bytes)]) + host_bytes
+
+        return struct.pack("!HB", rsv, frag) + bytes([atyp]) + addr_bytes + struct.pack("!H", port)
+
+
     async def async_close(self):
         if self.writer:
             self.writer.close()
@@ -256,3 +313,54 @@ class Socks5Client:
     def __str__(self):
         connection = f'connected="{self._host}:{self._port}" proxy="{self._proxy_host}:{self._proxy_port}"'
         return f'{self.__class__.__name__}({connection if self.connected else "waiting"}, cipher={self.cipher})'
+
+
+class UDPClient(asyncio.DatagramProtocol):
+    def __init__(self):
+        self.transport = None
+        self.recv_queue = asyncio.Queue()
+        self.logger = logging.getLogger(__name__)
+
+    def connection_made(self, transport):
+        self.transport = transport
+        self.logger.debug("UDP connected")
+
+    def datagram_received(self, data, addr):
+        self.recv_queue.put_nowait((data, addr))
+
+    def error_received(self, exc):
+        self.logger.error(f"UDP error: {exc}")
+
+    def connection_lost(self, exc):
+        self.logger.debug("UDP connection closed")
+
+    def send(self, data: bytes):
+        if self.transport is not None:
+            self.transport.sendto(data)
+
+    async def recv(self):
+        data, addr = await self.recv_queue.get()
+        if data is None:
+            raise ConnectionError("UDP connection closed")
+        return data, addr
+
+    def close(self):
+        if self.transport:
+            self.transport.close()
+            self.transport = None
+        self.recv_queue.put_nowait((None, None))
+
+    @staticmethod
+    async def create(host: str, port: int) -> 'UDPClient':
+        loop = asyncio.get_running_loop()
+        transport, protocol = await loop.create_datagram_endpoint(
+            lambda: UDPClient(),
+            remote_addr=(host, port)
+        )
+        protocol._transport = transport
+        return protocol
+
+    async def __aenter__(self):
+        return self
+    async def __aexit__(self, exc_type, exc, tb):
+        self.close()

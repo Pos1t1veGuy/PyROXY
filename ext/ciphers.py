@@ -302,7 +302,7 @@ class AESCipherCBC(AESCipherCTR):
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
                                         reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:
 
-        header_raw = await reader.readexactly(16)
+        header_raw = await reader.readexactly(AES.block_size)
         header = self.decrypt(header_raw)
         version, cmd, rsv, address_type, length = struct.unpack("!BBBBB", header[:5])
         if version != socks_version:
@@ -314,14 +314,14 @@ class AESCipherCBC(AESCipherCTR):
 
         match address_type:
             case 0x01:  # IPv4
-                encrypted = await reader.readexactly(16)
+                encrypted = await reader.readexactly(AES.block_size)
                 data = self.decrypt(encrypted)
                 addr = '.'.join(map(str, data[:4]))
                 port = int.from_bytes(data[4:], 'big')
 
             case 0x03:  # domain
                 total_len = length + 2
-                padded_len = ((total_len + 15) // 16) * 16
+                padded_len = ((total_len + 15) // AES.block_size) * AES.block_size
                 data = self.decrypt(await reader.readexactly(padded_len))
                 addr = data[:length].decode()
                 port = int.from_bytes(data[length:], 'big')
@@ -340,7 +340,7 @@ class AESCipherCBC(AESCipherCTR):
         address_type = 0x01
         head = "!BBBB"  # до address_type
         addr_data = socket.inet_aton("0.0.0.0")
-        tail = "4sH"  # addr_data + port
+        tail = "!4sH"  # addr_data + port
 
         try:
             ip = ipa.ip_address(address)
@@ -351,7 +351,7 @@ class AESCipherCBC(AESCipherCTR):
             elif ip.version == 6:
                 address_type = 0x04
                 addr_data = ip.packed
-                tail = "16sH"
+                tail = "!16sH"
 
         except ValueError:
             addr_bytes = address.encode('idna')
@@ -360,7 +360,7 @@ class AESCipherCBC(AESCipherCTR):
 
             address_type = 0x03
             addr_data = bytes([len(addr_bytes)]) + addr_bytes
-            tail = f"{len(addr_data)}sH"
+            tail = f"!{len(addr_data)}sH"
 
         except:
             address_type = 0x01
@@ -399,16 +399,20 @@ class AESCipherCBC(AESCipherCTR):
                 addr_port = self.decrypt(await reader.readexactly(AES.block_size))
                 addr_bytes, port_bytes = addr_port[:4], addr_port[4:6]
                 address = socket.inet_ntoa(addr_bytes)
+
             case 0x03:  # Domain
-                domain_len = (self.decrypt(await reader.readexactly(AES.block_size)))[0]
-                padded = ((total + AES.block_size - 1) // AES.block_size) * AES.block_size
+                padded = ((1 + len(addr_bytes) + 2 + AES.block_size - 1) // AES.block_size) * AES.block_size
                 addr_port = self.decrypt(await reader.readexactly(padded))
-                addr_bytes, port_bytes = addr_port[:domain_len], addr_port[domain_len:domain_len+2]
+                domain_len = addr_port[0]
+                addr_bytes = addr_port[1:1 + domain_len]
+                port_bytes = addr_port[1 + domain_len:1 + domain_len + 2]
                 address = addr_bytes.decode('idna')
+
             case 0x04:  # IPv6
                 addr_port = self.decrypt(await reader.readexactly(math.ceil(32 / AES.block_size)))
                 addr_bytes, port_bytes = addr_port[:16], addr_port[16:18]
                 address = socket.inet_ntop(socket.AF_INET6, addr_bytes)
+
             case _:
                 raise ConnectionError(f"Invalid ATYP in reply: {atyp}")
 
