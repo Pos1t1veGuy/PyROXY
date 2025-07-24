@@ -90,10 +90,14 @@ class Cipher:
         return bytes([socks_version, method])
 
     @staticmethod
-    async def client_get_method(reader: asyncio.StreamReader) -> int:
+    async def client_get_method(socks_version: int, reader: asyncio.StreamReader) -> int:
         response = await reader.readexactly(2)
+
+        if response[0] != socks_version:
+            raise ConnectionError(f"Unsupported SOCKS version: {version}")
         if response[1] == 0xFF:
             raise ConnectionError("No acceptable authentication methods.")
+
         return response[1]
 
     @staticmethod

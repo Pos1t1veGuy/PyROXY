@@ -204,25 +204,29 @@ class AESCipherCBC(AESCipherCTR):
         self._init_ciphers(iv)
 
         encrypted_header = await reader.readexactly(AES.block_size)
-        decrypted_header = self.decrypt(encrypted_header)
-        version, nmethods = decrypted_header
+        header = self.decrypt(encrypted_header)
+        version, nmethods = header[:2]
+        methods = header[2:]
 
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
 
-        padded_len = ((nmethods + AES.block_size - 1) // AES.block_size) * AES.block_size
-        encrypted_methods = await reader.readexactly(padded_len)
-        methods = self.decrypt(encrypted_methods)
+        if nmethods > AES.block_size-2:
+            padded_len = ((nmethods + AES.block_size - 15) // AES.block_size) * AES.block_size
+            encrypted_methods = await reader.readexactly(padded_len)
+            methods += self.decrypt(encrypted_methods)
 
         return {
             'supports_no_auth': 0x00 in methods,
             'supports_user_pass': 0x02 in methods
         }
 
-    async def client_get_method(self, reader: asyncio.StreamReader) -> int:
+    async def client_get_method(self, socks_version: int, reader: asyncio.StreamReader) -> int:
         decrypted_response = self.decrypt(await reader.readexactly(AES.block_size))
         version, method = struct.unpack("!BB", decrypted_response[:2])
 
+        if version != socks_version:
+            raise ConnectionError(f"Unsupported SOCKS version: {version}")
         if method == 0xFF:
             raise ConnectionError("No acceptable authentication methods.")
 
@@ -445,19 +449,20 @@ class AESCipherCTR_HTTPWS(AESCipherCTR):
         header = struct.pack("!BB", socks_version, len(methods))
 
         methods_bytes = struct.pack(f"!{len(methods)}B", *methods)
-        return self.iv + self.encrypt(header + methods_bytes, mask=False, wrap=False)
+        return self.wrapper.wrap(self.iv + self.encrypt(header + methods_bytes, wrap=False))
 
     async def server_get_methods(self, socks_version: int, reader: asyncio.StreamReader) -> Dict[str, bool]:
+        header, length, mask = await self.wrapper.cut_ws_header(reader)
         iv = await reader.readexactly(16)
         self._init_ciphers(iv)
 
-        version, nmethods = struct.unpack("!BB", self.decrypt(await reader.readexactly(2), mask=b'', wrap=False))
+        version, nmethods = struct.unpack("!BB", self.decrypt(await reader.readexactly(2), mask=mask, wrap=False))
 
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
 
         encrypted_methods = await reader.readexactly(nmethods)
-        methods = self.decrypt(encrypted_methods, mask=b'', wrap=False)
+        methods = self.decrypt(encrypted_methods, mask=mask, wrap=False)
 
         return {
             'supports_no_auth': 0x00 in methods,
@@ -604,9 +609,7 @@ class AESCipherCTR_HTTPWS(AESCipherCTR):
         if wrap:
             return self.wrapper.wrap(data, mask=self.is_client and mask)
         elif mask:
-            r = self.wrapper.rmask
-            print(123, r)
-            return self.wrapper.mask(data, r)
+            return self.wrapper.mask(data, self.wrapper.rmask)
         else:
             return data
 
