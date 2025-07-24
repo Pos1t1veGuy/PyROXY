@@ -40,6 +40,8 @@ class Socks5Server:
         self.udp_cipher = Cipher if udp_cipher is None else udp_cipher
         self.logger = logging.getLogger(__name__)
 
+        self.cipher.is_server = True
+
         self.user_commands = USER_COMMANDS if user_commands is None else user_commands
         self.asyncio_server = None
         self.users = []
@@ -73,6 +75,7 @@ class Socks5Server:
                 self.logger.warning(f"Blocked connection from non-whitelisted IP: {client_ip}")
                 return
         user = await self.add_user(client_ip, client_port, writer)
+        await self.cipher.server_hello(self, user, reader, writer)
 
         try:
             methods = await self.cipher.server_get_methods(self.socks_version, reader)

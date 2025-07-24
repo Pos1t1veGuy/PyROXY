@@ -14,6 +14,9 @@ which typically consists of 4–5 stages. This class defines symmetric methods f
 ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
 [ CLIENT SIDE ]                         [ SERVER SIDE ]
 ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
+0. client_send_methods →              → server_get_methods
+   - *If you want it will custom start of your handshake. By default it is empty.
+   
 1. client_send_methods →              → server_get_methods
    - Client sends SOCKS version and list of supported auth methods.
 
@@ -49,6 +52,16 @@ Each `Cipher` subclass must implement or override:
 
 class Cipher:
     def __init__(self):
+        self.is_client = False
+        self.is_server = False
+
+    @staticmethod
+    async def server_hello(server: 'Socks5Server', user: 'User', reader: asyncio.StreamReader,
+                                   writer: asyncio.StreamWriter) -> None:
+        ...
+
+    @staticmethod
+    async def client_hello(client: 'Socks5Client', reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         ...
 
     @staticmethod

@@ -23,6 +23,8 @@ class Socks5Client:
         self.bytes_received = 0
         self.logger = logging.getLogger(__name__)
 
+        self.cipher.is_client = True
+
         self.user_commands = {
             'connect': 0x01,
             'bind': 0x02,
@@ -43,13 +45,15 @@ class Socks5Client:
         self.reader, self.writer = await asyncio.open_connection(proxy_host, proxy_port)
         self.logger.info(f"Connected to SOCKS5 proxy at {proxy_host}:{proxy_port}")
 
+        await self.cipher.client_hello(self, self.reader, self.writer)
+
         methods = [0x00]
         if username and password:
             methods.insert(0, 0x02)
 
         methods_msg = await self.cipher.client_send_methods(self.socks_version, methods)
         await self.asend(methods_msg, encrypt=False, log_bytes=False)
-        method_chosen = await self.cipher.client_get_method(self.reader)
+        method_chosen = await self.cipher.client_get_method(self.socks_version, self.reader)
 
         if method_chosen == 0xFF:
             raise ConnectionError("No acceptable authentication methods.")
