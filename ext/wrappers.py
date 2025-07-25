@@ -41,7 +41,8 @@ Connection: close
 <center><h1>400 Bad Request</h1></center>
 <hr><center>nginx/1.24.0</center>
 </body>
-</html>'''
+</html>
+'''
         self.ERROR403 = b'''HTTP/1.1 403 Forbidden
 Content-Type: text/html; charset=UTF-8
 Content-Length: 162
@@ -53,7 +54,8 @@ Connection: close
 <center><h1>403 Forbidden</h1></center>
 <hr><center>nginx/1.24.0</center>
 </body>
-</html>'''
+</html>
+'''
         self.ERROR404 = b'''HTTP/1.1 404 Not Found
 Content-Type: text/html; charset=UTF-8
 Content-Length: 153
@@ -65,7 +67,8 @@ Connection: close
 <center><h1>404 Not Found</h1></center>
 <hr><center>nginx/1.24.0</center>
 </body>
-</html>'''
+</html>
+'''
         self.ERROR405 = b'''HTTP/1.1 405 Method Not Allowed
 Content-Type: text/html; charset=UTF-8
 Content-Length: 166
@@ -78,7 +81,8 @@ Allow: GET
 <center><h1>405 Not Allowed</h1></center>
 <hr><center>nginx/1.24.0</center>
 </body>
-</html>'''
+</html>
+'''
         self.ERROR408 = b'''HTTP/1.1 408 Request Timeout
 Content-Type: text/html; charset=UTF-8
 Content-Length: 168
@@ -103,13 +107,22 @@ Connection: close
 <center><h1>500 Internal Server Error</h1></center>
 <hr><center>nginx/1.24.0</center>
 </body>
-</html>'''
+</html>
+'''
 
         self.errors = {}
         for attr_name in dir(self):
             if attr_name.startswith('ERROR'):
                 num = int(attr_name.split('ERROR')[1])
                 attr = getattr(self, attr_name)
+
+                if attr[-1] != b'\n':
+                    attr += b'\n'
+                if attr[-2] != b'\n':
+                    attr += b'\n'
+                attr = b'\n\r'.join(attr.split(b'\n'))
+
+                setattr(self, attr_name, attr)
                 self.errors[num] = attr
 
     async def http_client_hello(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
@@ -140,19 +153,18 @@ Connection: close
             try:
                 request = await reader.readuntil(b"\r\n\r\n")
             except asyncio.IncompleteReadError:
-                return await self.http_error(400)
-                return False
+                return await self.http_error(writer, 400)
 
             request_str = request.decode(errors='ignore')
             method, path, version = request_str.split()[:3]
 
             if method != "GET":
-                return await self.http_error(405)
+                return await self.http_error(writer, 405)
             if path != self.http_path:
-                return await self.http_error(404)
+                return await self.http_error(writer, 404)
             if not 'Host:' in request_str:
                 await asyncio.sleep(self.timeout)
-                return await self.http_error(408)
+                return await self.http_error(writer, 408)
 
             response = (
                 "HTTP/1.1 200 OK\r\n"
@@ -172,7 +184,7 @@ Connection: close
             return True
         except Exception as ex:
             server.logger.error(f'Server hello error: {ex}')
-            return await self.http_error(500)
+            return await self.http_error(writer, 500)
 
     async def ws_client_hello(self, client: 'Socks5Client', reader: asyncio.StreamReader,
                               writer: asyncio.StreamWriter) -> bool:
@@ -190,34 +202,33 @@ Connection: close
         await writer.drain()
 
         response = await reader.readuntil(b"\r\n\r\n")
-        return b"101" not in response or b"Switching Protocols" not in response
+        return b"101" in response and b"Switching Protocols" in response
 
-    async def ws_server_hello(self, server: 'Socks5Server', user: 'User', reader: asyncio.StreamReader,
+    async def ws_server_hello(self, server: 'Socks5Server', reader: asyncio.StreamReader,
                            writer: asyncio.StreamWriter) -> bool:
         try:
             try:
                 request = await reader.readuntil(b"\r\n\r\n")
             except asyncio.exceptions.IncompleteReadError:
                 await asyncio.sleep(self.timeout)
-                return await self.http_error(408)
-                return False
+                return await self.http_error(writer, 408)
 
             request_str = request.decode(errors='ignore')
             method, path, version = request_str.split()[:3]
 
             if "upgrade: websocket" not in request_str.lower():
-                return await self.http_error(404)
+                return await self.http_error(writer, 404)
             if method != "GET":
-                return await self.http_error(405)
+                return await self.http_error(writer, 405)
             if path != self.ws_path:
-                return await self.http_error(404)
+                return await self.http_error(writer, 404)
             if not 'Host:' in request_str:
                 await asyncio.sleep(self.timeout)
-                return await self.http_error(408)
+                return await self.http_error(writer, 408)
 
             key_line = [line for line in request.decode().split("\r\n") if line.lower().startswith("sec-websocket-key")]
             if not key_line:
-                return await self.http_error(404)
+                return await self.http_error(writer, 404)
             client_key = key_line[0].split(":")[1].strip()
             accept = base64.b64encode(hashlib.sha1((client_key + self.GUID).encode()).digest()).decode()
 
@@ -233,7 +244,7 @@ Connection: close
             return True
         except Exception as ex:
             server.logger.error(f'Server hello error: {ex}')
-            return await self.http_error(500)
+            return await self.http_error(writer, 500)
 
     async def client_hello(self, client: 'Socks5Client', reader: asyncio.StreamReader,
                            writer: asyncio.StreamWriter) -> bool:
@@ -241,10 +252,10 @@ Connection: close
         ws = await self.ws_client_hello(client, reader, writer)
         return http and ws
 
-    async def server_hello(self, server: 'Socks5Server', user: 'User', reader: asyncio.StreamReader,
+    async def server_hello(self, server: 'Socks5Server', reader: asyncio.StreamReader,
                            writer: asyncio.StreamWriter) -> bool:
         http = await self.http_server_hello(reader, writer)
-        ws = await self.ws_server_hello(server, user, reader, writer)
+        ws = await self.ws_server_hello(server, reader, writer)
         return http and ws
 
     def unwrap(self, ws_frame: bytes) -> bytes:

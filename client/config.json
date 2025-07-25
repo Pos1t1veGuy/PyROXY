@@ -1,0 +1,8 @@
+{
+  "username": "admin_username",
+  "password": "admin_password",
+  "local_proxy_host": "127.0.0.1",
+  "local_proxy_port": 180,
+  "remote_proxy_host": "127.0.0.1",
+  "remote_proxy_port": 1080
+}

@@ -7,8 +7,8 @@ import socket
 import time
 import traceback
 
-import logger_setup
-from base_cipher import Cipher
+from .logger_setup import *
+from .base_cipher import Cipher
 
 
 MAX_PAYLOAD_UDP = 65535
@@ -66,6 +66,38 @@ class Socks5Server:
         except KeyboardInterrupt:
             self.logger.info("Server is closed")
 
+    async def handshake(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, cipher: 'Cipher',
+                        user: Optional['User'] = None) -> 'User':
+        if user is None:
+            client_ip, client_port = writer.get_extra_info("peername")
+            user = await self.add_user(client_ip, client_port, writer)
+
+        methods = await cipher.server_get_methods(self.socks_version, reader)
+
+        if methods['supports_no_auth'] and self.accept_anonymous:
+            logging.info(f'{user} authorizing as Anonynous')
+            data = await cipher.server_send_method_to_user(self.socks_version, 0x00)
+            await self.send(writer, data, log_bytes=False)
+        elif methods['supports_user_pass']:
+            logging.info(f'{user} authorizing with username:password')
+            data = await cipher.server_send_method_to_user(self.socks_version, 0x02)
+            await self.send(writer, data, log_bytes=False)
+
+            auth_data = await cipher.server_auth_userpass(self.users_auth_data, reader, writer)
+            if not auth_data:
+                raise ConnectionError(f"Wrong authentication data {user}")
+
+            user.username, user.password = auth_data
+        else:
+            data = await cipher.server_send_method_to_user(self.socks_version, 0xFF)
+            await self.send(writer, data, log_bytes=False)
+            raise ConnectionError(f'Can not use authentication method {user}')
+
+        user.handshaked = True
+        logging.info(f'{user} is handshaked')
+        return user
+
+
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         client_ip, client_port = writer.get_extra_info("peername")
         if not self.users_black_list is None:
@@ -77,31 +109,12 @@ class Socks5Server:
                 self.logger.warning(f"Blocked connection from non-whitelisted IP: {client_ip}")
                 return
         user = await self.add_user(client_ip, client_port, writer)
+        logging.info(f'{user} is connecting...')
         cipher = self.cipher.copy()
 
         try:
-            if await cipher.server_hello(self, user, reader, writer):
-                methods = await cipher.server_get_methods(self.socks_version, reader)
-
-                if methods['supports_user_pass']:
-                    data = await cipher.server_send_method_to_user(self.socks_version, 0x02)
-                    await self.send(writer, data, log_bytes=False)
-
-                    auth_data = await cipher.server_auth_userpass(self.users_auth_data, reader, writer)
-                    if not auth_data:
-                        self.logger.warning(f"Authentication failed {client_ip}:{client_port}")
-                        return
-
-                    user.username, user.password = auth_data
-                elif methods['supports_no_auth'] and self.accept_anonymous:
-                    data = await cipher.server_send_method_to_user(self.socks_version, 0x00)
-                    await self.send(writer, data, log_bytes=False)
-                else:
-                    data = await cipher.server_send_method_to_user(self.socks_version, 0xFF)
-                    await self.send(writer, data, log_bytes=False)
-                    return
-
-                user.handshaked = True
+            if await cipher.server_hello(self, reader, writer):
+                await self.handshake(reader, writer, cipher, user=user)
 
                 addr, port, command = await cipher.server_handle_command(
                     self.socks_version, self.user_commands, reader
@@ -190,12 +203,6 @@ class Socks5Server:
         return self
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.async_close()
-
-    def __enter__(self):
-        self.start()
-        return self
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
 
     def __str__(self):
         return f'{self.__class__.__name__}(host="{self.host}", port={self.port}, cipher={self.cipher})'
@@ -413,7 +420,7 @@ class ConnectionMethods:
     @staticmethod
     async def CONNECT(server: Socks5Server, addr: str, port: int, user: User, cipher: Cipher,
                              client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> int:
-        server.logger.info(f"Establishing TCP connection to {addr}:{port}...")
+        server.logger.debug(f"Establishing TCP connection to {addr}:{port}...")
 
         try:
             remote_reader, remote_writer = await asyncio.open_connection(addr, port)
@@ -430,18 +437,19 @@ class ConnectionMethods:
             server.pipe(client_reader, remote_writer, decrypt=cipher.decrypt), # client -> server
             server.pipe(remote_reader, client_writer, encrypt=cipher.encrypt), # client <- servers
         )
-        server.logger.info(f"TCP connection to {addr}:{port} is closed")
+        server.logger.debug(f"TCP connection to {addr}:{port} is closed")
         return 0
 
     @staticmethod
     async def BIND(server: Socks5Server, addr: str, port: int, user: User, cipher: Cipher,
                           client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> int:
-        server.logger.info(f"bind_socket {addr}:{port}")
+        server.logger.error(f"bind_socket {addr}:{port}")
         return 0
 
     @staticmethod
     async def UDP_ASSOCIATE(server: Socks5Server, addr: str, port: int, user: User, cipher: Cipher,
                              client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> int:
+        server.logger.debug("Starting UDP server...")
         loop = asyncio.get_running_loop()
 
         try:
@@ -487,7 +495,7 @@ class ConnectionMethods:
                     break
         finally:
             transport.close()
-            server.logger.info("UDP server closed")
+            server.logger.debug("UDP server closed")
 
         return 0
 

@@ -61,8 +61,7 @@ class Cipher:
         return self.__class__(*self._init_args, **self._init_kwargs)
 
     @staticmethod
-    async def server_hello(server: 'Socks5Server', user: 'User', reader: asyncio.StreamReader,
-                                   writer: asyncio.StreamWriter) -> bool:
+    async def server_hello(server: 'Socks5Server', reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
         return True
 
     @staticmethod
