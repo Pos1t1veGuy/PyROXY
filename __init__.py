@@ -1,3 +1,4 @@
-from proxy_server import *
-from proxy_client import *
-from base_cipher import Cipher, IVCipher
+from .proxy_server import *
+from .proxy_client import *
+from .base_cipher import Cipher, IVCipher
+from .console_gui import *

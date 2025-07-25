@@ -5,8 +5,8 @@ import logging
 import ipaddress
 import struct
 
-from base_cipher import Cipher
-import logger_setup
+from .logger_setup import *
+from .base_cipher import Cipher
 
 
 class Socks5Client:

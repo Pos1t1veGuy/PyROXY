@@ -7,8 +7,8 @@ import socket
 import time
 import traceback
 
-import logger_setup
-from base_cipher import Cipher
+from .logger_setup import *
+from .base_cipher import Cipher
 
 
 MAX_PAYLOAD_UDP = 65535
@@ -190,12 +190,6 @@ class Socks5Server:
         return self
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.async_close()
-
-    def __enter__(self):
-        self.start()
-        return self
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
 
     def __str__(self):
         return f'{self.__class__.__name__}(host="{self.host}", port={self.port}, cipher={self.cipher})'
