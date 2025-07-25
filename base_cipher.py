@@ -51,17 +51,22 @@ Each `Cipher` subclass must implement or override:
 
 
 class Cipher:
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         self.is_client = False
         self.is_server = False
+        self._init_args = args
+        self._init_kwargs = kwargs
+
+    def copy(self) -> 'Cipher':
+        return self.__class__(*self._init_args, **self._init_kwargs)
 
     @staticmethod
     async def server_hello(server: 'Socks5Server', user: 'User', reader: asyncio.StreamReader,
-                                   writer: asyncio.StreamWriter) -> None:
+                                   writer: asyncio.StreamWriter) -> bool:
         ...
 
     @staticmethod
-    async def client_hello(client: 'Socks5Client', reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def client_hello(client: 'Socks5Client', reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
         ...
 
     @staticmethod
@@ -271,7 +276,7 @@ class Cipher:
 
 class IVCipher(Cipher):
     def __init__(self, key: bytes, iv: Optional[bytes] = None):
-        super().__init__()
+        super().__init__(key, iv=iv)
         self.key = key
         assert iv is None or len(iv) == 16, "IV must be exactly 16 bytes"
         self.iv = iv

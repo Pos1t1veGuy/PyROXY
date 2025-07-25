@@ -1,1 +1,2 @@
 pycryptodomex==3.23.0
+fake-useragent==1.5.1

@@ -1,0 +1,25 @@
+<html>
+<head><title>Welcome</title></head>
+<body>
+    <h1>Hello World!</h1>
+    <script>
+        const sock = new WebSocket("ws://" + window.location.host + "/ws");
+
+        sock.onopen = () => {
+            sock.send("123");
+        };
+
+        sock.onmessage = (event) => {
+            console.log("Received from server:", event.data);
+        };
+
+        sock.onerror = (err) => {
+            console.error("WebSocket error:", err);
+        };
+
+        sock.onclose = () => {
+            console.log("WebSocket connection closed");
+        };
+    </script>
+</body>
+</html>

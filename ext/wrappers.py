@@ -1,8 +1,10 @@
+from typing import *
 import asyncio
 import base64
 import struct
 import hashlib
 import os
+from fake_useragent import UserAgent
 
 
 class Wrapper: ...
@@ -10,16 +12,79 @@ class Wrapper: ...
 class HTTP_WS_Wrapper(Wrapper):
     GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
-    def __init__(self, path: str = "/", host: str = "example.com"):
-        self.path = path
+    def __init__(self, http_path: str = "/", ws_path: str = "/ws/", host: str = "example.com",
+                 http_response_file: Optional[str] = None):
+        self.http_path = http_path
+        self.ws_path = ws_path
         self.host = host
+        self.client_user_agent = user_agent = UserAgent().random
+        self.browser_user = False
+
+        if http_response_file is None:
+            http_response_file = os.path.dirname(__file__) + '/index.html'
+        if not os.path.isfile(http_response_file):
+            raise FileNotFoundError(f"HTTP response file '{http_response_file}' not found")
+        self.http_file_path = http_response_file
+        with open(http_response_file, 'r', encoding='utf-8') as f:
+            self.http_response = f.read().strip()
+        self.http_content_length = len(self.http_response.encode())
+
         self._mask_offset = 0
 
-    async def client_hello(self, client: 'Socks5Client', reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    async def http_client_hello(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
+        http_get = (
+            f"GET {self.http_path} HTTP/1.1\r\n"
+            f"Host: {self.host}\r\n"
+            f"User-Agent: {self.client_user_agent}\r\n"
+            "Accept: text/html\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        )
+        writer.write(http_get.encode())
+        await writer.drain()
 
+        try:
+            headers = await reader.readuntil(b"\r\n\r\n")
+        except asyncio.IncompleteReadError:
+            raise ConnectionError('Invalid data received from client')
+        response = headers
+        content_length = int(headers.split(b'Content-Length: ')[1].split(b'\r\n')[0])
+        response += await reader.readexactly(content_length)
+
+        return b'200 OK' in response
+
+    async def http_server_hello(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
+        try:
+            request = await reader.readuntil(b"\r\n\r\n")
+        except asyncio.IncompleteReadError:
+            return False # Invalid data received from client
+
+        request_str = request.decode(errors='ignore')
+        if not request_str.startswith("GET "):
+            return False # Invalid data received from client
+
+        response = (
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/html; charset=utf-8\r\n"
+            f"Content-Length: {self.http_content_length}\r\n"
+            "Cache-Control: no-cache, no-store, must-revalidate\r\n"
+            "Pragma: no-cache\r\n"
+            "Expires: 0\r\n"
+            "Connection: close\r\n"
+            "X-Powered-By: PHP/7.4.3\r\n"
+            "\r\n"
+            f"{self.http_response}"
+        )
+
+        writer.write(response.encode())
+        await writer.drain()
+        return True
+
+    async def ws_client_hello(self, client: 'Socks5Client', reader: asyncio.StreamReader,
+                              writer: asyncio.StreamWriter) -> bool:
         key = base64.b64encode(os.urandom(16)).decode()
         http_get = (
-            f"GET {self.path} HTTP/1.1\r\n"
+            f"GET {self.http_path} HTTP/1.1\r\n"
             f"Host: {self.host}\r\n"
             "Upgrade: websocket\r\n"
             "Connection: Upgrade\r\n"
@@ -31,18 +96,22 @@ class HTTP_WS_Wrapper(Wrapper):
         await writer.drain()
 
         response = await reader.readuntil(b"\r\n\r\n")
-        if b"101" not in response or b"Switching Protocols" not in response:
-            raise ConnectionError(f"WebSocket handshake failed: {response!r}")
+        return b"101" not in response or b"Switching Protocols" not in response
 
-    async def server_hello(self, server: 'Socks5Server', user: 'User', reader: asyncio.StreamReader,
-                           writer: asyncio.StreamWriter):
-        request = await reader.readuntil(b"\r\n\r\n")
+    async def ws_server_hello(self, server: 'Socks5Server', user: 'User', reader: asyncio.StreamReader,
+                           writer: asyncio.StreamWriter) -> bool:
+        try:
+            request = await reader.readuntil(b"\r\n\r\n")
+        except asyncio.exceptions.IncompleteReadError:
+            self.browser_user = True
+            return False
+
         if b"upgrade: websocket" not in request.lower():
             raise ConnectionError("Not a websocket upgrade request")
 
         key_line = [line for line in request.decode().split("\r\n") if line.lower().startswith("sec-websocket-key")]
         if not key_line:
-            raise ConnectionError("No Sec-WebSocket-Key in request")
+            return False # No Sec-WebSocket-Key in request
         client_key = key_line[0].split(":")[1].strip()
 
         # Sec-WebSocket-Accept
@@ -57,6 +126,19 @@ class HTTP_WS_Wrapper(Wrapper):
         )
         writer.write(response.encode())
         await writer.drain()
+        return True
+
+    async def client_hello(self, client: 'Socks5Client', reader: asyncio.StreamReader,
+                           writer: asyncio.StreamWriter) -> bool:
+        http = await self.http_client_hello(reader, writer)
+        ws = await self.ws_client_hello(client, reader, writer)
+        return http and ws
+
+    async def server_hello(self, server: 'Socks5Server', user: 'User', reader: asyncio.StreamReader,
+                           writer: asyncio.StreamWriter) -> bool:
+        http = await self.http_server_hello(reader, writer)
+        ws = await self.ws_server_hello(server, user, reader, writer)
+        return http and ws
 
     def unwrap(self, ws_frame: bytes) -> bytes:
         first_byte, second_byte = ws_frame[0], ws_frame[1]
