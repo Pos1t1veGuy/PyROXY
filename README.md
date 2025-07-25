@@ -7,7 +7,7 @@ Designed for **customizable handshake obfuscation** and **traffic encryption**.
 
 ## ✅ Features
 
-* Full **SOCKS5 support** (CONNECT implemented, BIND & UDP ASSOCIATE planned)
+* Full **SOCKS5 support** (CONNECT & UDP ASSOCIATE implemented, BIND planned)
 * **Async** server and client (`asyncio`)
 * **Custom encryption API**:
   * Built-in: `AESCipherCBC`, `AESCipherCRT` (You need to install requirements.txt in 'ext' folder)
