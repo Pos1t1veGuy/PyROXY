@@ -63,11 +63,11 @@ class Cipher:
     @staticmethod
     async def server_hello(server: 'Socks5Server', user: 'User', reader: asyncio.StreamReader,
                                    writer: asyncio.StreamWriter) -> bool:
-        ...
+        return True
 
     @staticmethod
     async def client_hello(client: 'Socks5Client', reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
-        ...
+        return True
 
     @staticmethod
     async def client_send_methods(socks_version: int, methods: List[int]) -> bytes:

@@ -13,12 +13,12 @@ class HTTP_WS_Wrapper(Wrapper):
     GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
     def __init__(self, http_path: str = "/", ws_path: str = "/ws/", host: str = "example.com",
-                 http_response_file: Optional[str] = None):
+                 http_response_file: Optional[str] = None, timeout: int = 5):
         self.http_path = http_path
         self.ws_path = ws_path
         self.host = host
+        self.timeout = timeout
         self.client_user_agent = user_agent = UserAgent().random
-        self.browser_user = False
 
         if http_response_file is None:
             http_response_file = os.path.dirname(__file__) + '/index.html'
@@ -30,6 +30,87 @@ class HTTP_WS_Wrapper(Wrapper):
         self.http_content_length = len(self.http_response.encode())
 
         self._mask_offset = 0
+        self.ERROR400 = b'''HTTP/1.1 400 Bad Request
+Content-Type: text/html; charset=UTF-8
+Content-Length: 155
+Connection: close
+
+<html>
+<head><title>400 Bad Request</title></head>
+<body>
+<center><h1>400 Bad Request</h1></center>
+<hr><center>nginx/1.24.0</center>
+</body>
+</html>'''
+        self.ERROR403 = b'''HTTP/1.1 403 Forbidden
+Content-Type: text/html; charset=UTF-8
+Content-Length: 162
+Connection: close
+
+<html>
+<head><title>403 Forbidden</title></head>
+<body>
+<center><h1>403 Forbidden</h1></center>
+<hr><center>nginx/1.24.0</center>
+</body>
+</html>'''
+        self.ERROR404 = b'''HTTP/1.1 404 Not Found
+Content-Type: text/html; charset=UTF-8
+Content-Length: 153
+Connection: close
+
+<html>
+<head><title>404 Not Found</title></head>
+<body>
+<center><h1>404 Not Found</h1></center>
+<hr><center>nginx/1.24.0</center>
+</body>
+</html>'''
+        self.ERROR405 = b'''HTTP/1.1 405 Method Not Allowed
+Content-Type: text/html; charset=UTF-8
+Content-Length: 166
+Connection: close
+Allow: GET
+
+<html>
+<head><title>405 Not Allowed</title></head>
+<body>
+<center><h1>405 Not Allowed</h1></center>
+<hr><center>nginx/1.24.0</center>
+</body>
+</html>'''
+        self.ERROR408 = b'''HTTP/1.1 408 Request Timeout
+Content-Type: text/html; charset=UTF-8
+Content-Length: 168
+Connection: close
+
+<html>
+<head><title>408 Request Timeout</title></head>
+<body>
+<center><h1>408 Request Timeout</h1></center>
+<hr><center>nginx/1.24.0</center>
+</body>
+</html>
+'''
+        self.ERROR500 = b'''HTTP/1.1 500 Internal Server Error
+Content-Type: text/html; charset=UTF-8
+Content-Length: 162
+Connection: close
+
+<html>
+<head><title>500 Internal Server Error</title></head>
+<body>
+<center><h1>500 Internal Server Error</h1></center>
+<hr><center>nginx/1.24.0</center>
+</body>
+</html>'''
+
+        self.errors = {}
+        for attr_name in dir(self):
+            if attr_name.startswith('ERROR'):
+                num = int(attr_name.split('ERROR')[1])
+                attr = getattr(self, attr_name)
+                self.errors[num] = attr
 
     async def http_client_hello(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
         http_get = (
@@ -46,7 +127,8 @@ class HTTP_WS_Wrapper(Wrapper):
         try:
             headers = await reader.readuntil(b"\r\n\r\n")
         except asyncio.IncompleteReadError:
-            raise ConnectionError('Invalid data received from client')
+            raise ConnectionError('Server gets invalid response')
+
         response = headers
         content_length = int(headers.split(b'Content-Length: ')[1].split(b'\r\n')[0])
         response += await reader.readexactly(content_length)
@@ -55,36 +137,48 @@ class HTTP_WS_Wrapper(Wrapper):
 
     async def http_server_hello(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
         try:
-            request = await reader.readuntil(b"\r\n\r\n")
-        except asyncio.IncompleteReadError:
-            return False # Invalid data received from client
+            try:
+                request = await reader.readuntil(b"\r\n\r\n")
+            except asyncio.IncompleteReadError:
+                return await self.http_error(400)
+                return False
 
-        request_str = request.decode(errors='ignore')
-        if not request_str.startswith("GET "):
-            return False # Invalid data received from client
+            request_str = request.decode(errors='ignore')
+            method, path, version = request_str.split()[:3]
 
-        response = (
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/html; charset=utf-8\r\n"
-            f"Content-Length: {self.http_content_length}\r\n"
-            "Cache-Control: no-cache, no-store, must-revalidate\r\n"
-            "Pragma: no-cache\r\n"
-            "Expires: 0\r\n"
-            "Connection: close\r\n"
-            "X-Powered-By: PHP/7.4.3\r\n"
-            "\r\n"
-            f"{self.http_response}"
-        )
+            if method != "GET":
+                return await self.http_error(405)
+            if path != self.http_path:
+                return await self.http_error(404)
+            if not 'Host:' in request_str:
+                await asyncio.sleep(self.timeout)
+                return await self.http_error(408)
 
-        writer.write(response.encode())
-        await writer.drain()
-        return True
+            response = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/html; charset=utf-8\r\n"
+                f"Content-Length: {self.http_content_length}\r\n"
+                "Cache-Control: no-cache, no-store, must-revalidate\r\n"
+                "Pragma: no-cache\r\n"
+                "Expires: 0\r\n"
+                "Connection: close\r\n"
+                "X-Powered-By: PHP/7.4.3\r\n"
+                "\r\n"
+                f"{self.http_response}"
+            )
+
+            writer.write(response.encode())
+            await writer.drain()
+            return True
+        except Exception as ex:
+            server.logger.error(f'Server hello error: {ex}')
+            return await self.http_error(500)
 
     async def ws_client_hello(self, client: 'Socks5Client', reader: asyncio.StreamReader,
                               writer: asyncio.StreamWriter) -> bool:
         key = base64.b64encode(os.urandom(16)).decode()
         http_get = (
-            f"GET {self.http_path} HTTP/1.1\r\n"
+            f"GET {self.ws_path} HTTP/1.1\r\n"
             f"Host: {self.host}\r\n"
             "Upgrade: websocket\r\n"
             "Connection: Upgrade\r\n"
@@ -101,32 +195,45 @@ class HTTP_WS_Wrapper(Wrapper):
     async def ws_server_hello(self, server: 'Socks5Server', user: 'User', reader: asyncio.StreamReader,
                            writer: asyncio.StreamWriter) -> bool:
         try:
-            request = await reader.readuntil(b"\r\n\r\n")
-        except asyncio.exceptions.IncompleteReadError:
-            self.browser_user = True
-            return False
+            try:
+                request = await reader.readuntil(b"\r\n\r\n")
+            except asyncio.exceptions.IncompleteReadError:
+                await asyncio.sleep(self.timeout)
+                return await self.http_error(408)
+                return False
 
-        if b"upgrade: websocket" not in request.lower():
-            raise ConnectionError("Not a websocket upgrade request")
+            request_str = request.decode(errors='ignore')
+            method, path, version = request_str.split()[:3]
 
-        key_line = [line for line in request.decode().split("\r\n") if line.lower().startswith("sec-websocket-key")]
-        if not key_line:
-            return False # No Sec-WebSocket-Key in request
-        client_key = key_line[0].split(":")[1].strip()
+            if "upgrade: websocket" not in request_str.lower():
+                return await self.http_error(404)
+            if method != "GET":
+                return await self.http_error(405)
+            if path != self.ws_path:
+                return await self.http_error(404)
+            if not 'Host:' in request_str:
+                await asyncio.sleep(self.timeout)
+                return await self.http_error(408)
 
-        # Sec-WebSocket-Accept
-        accept = base64.b64encode(hashlib.sha1((client_key + self.GUID).encode()).digest()).decode()
+            key_line = [line for line in request.decode().split("\r\n") if line.lower().startswith("sec-websocket-key")]
+            if not key_line:
+                return await self.http_error(404)
+            client_key = key_line[0].split(":")[1].strip()
+            accept = base64.b64encode(hashlib.sha1((client_key + self.GUID).encode()).digest()).decode()
 
-        response = (
-            "HTTP/1.1 101 Switching Protocols\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            f"Sec-WebSocket-Accept: {accept}\r\n"
-            "\r\n"
-        )
-        writer.write(response.encode())
-        await writer.drain()
-        return True
+            response = (
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Accept: {accept}\r\n"
+                "\r\n"
+            )
+            writer.write(response.encode())
+            await writer.drain()
+            return True
+        except Exception as ex:
+            server.logger.error(f'Server hello error: {ex}')
+            return await self.http_error(500)
 
     async def client_hello(self, client: 'Socks5Client', reader: asyncio.StreamReader,
                            writer: asyncio.StreamWriter) -> bool:
@@ -212,3 +319,9 @@ class HTTP_WS_Wrapper(Wrapper):
             mask = await reader.readexactly(4)
 
         return first_two + extended + mask, length, mask
+
+    async def http_error(self, writer, num: int) -> bool:
+        writer.write(self.errors[num])
+        await writer.drain()
+        writer.close()
+        return False

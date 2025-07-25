@@ -36,11 +36,12 @@ class Socks5Server:
         self.users_black_list = users_black_list
         self.log_bytes = log_bytes # only after handshake
         self.udp_server_timeout = udp_server_timeout
-        self.cipher = Cipher if cipher is None else cipher
-        self.udp_cipher = Cipher if udp_cipher is None else udp_cipher
+        self.cipher = Cipher() if cipher is None else cipher
+        self.udp_cipher = Cipher() if udp_cipher is None else udp_cipher
         self.logger = logging.getLogger(__name__)
 
         self.cipher.is_server = True
+        self.udp_cipher.is_server = True
 
         self.user_commands = USER_COMMANDS if user_commands is None else user_commands
         self.asyncio_server = None
@@ -52,7 +53,8 @@ class Socks5Server:
     async def async_start(self):
         try:
             self.asyncio_server = await asyncio.start_server(self.handle_client, self.host, self.port)
-            self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port}")
+            cip_name = self.cipher.__class__.__name__
+            self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port} using cipher {cip_name}")
             async with self.asyncio_server:
                 await self.asyncio_server.serve_forever()
         except KeyboardInterrupt:
@@ -183,7 +185,8 @@ class Socks5Server:
 
     async def __aenter__(self):
         self.asyncio_server = await asyncio.start_server(self.handle_client, self.host, self.port)
-        self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port}")
+        cip_name = self.cipher.__class__.__name__
+        self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port} using cipher {cip_name}")
         return self
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.async_close()

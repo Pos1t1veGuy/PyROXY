@@ -12,8 +12,8 @@ import logger_setup
 class Socks5Client:
     def __init__(self, cipher: Optional[Cipher] = None, udp_cipher: Optional[Cipher] = None,  log_bytes: bool = True):
         self.socks_version = 5
-        self.cipher = Cipher if cipher is None else cipher
-        self.udp_cipher = Cipher if udp_cipher is None else udp_cipher
+        self.default_cipher = Cipher() if cipher is None else cipher
+        self.default_udp_cipher = Cipher() if udp_cipher is None else udp_cipher
         self.log_bytes = log_bytes # only after handshake
         self.udp_socket = None
         self.reader: Optional[asyncio.StreamReader] = None
@@ -23,13 +23,16 @@ class Socks5Client:
         self.bytes_received = 0
         self.logger = logging.getLogger(__name__)
 
-        self.cipher.is_client = True
+        self.default_cipher.is_client = True
+        self.default_udp_cipher.is_client = True
 
         self.user_commands = {
             'connect': 0x01,
             'bind': 0x02,
             'associate': 0x03,
         }
+        self.cipher = self.default_cipher.copy()
+        self.udp_cipher = self.default_udp_cipher.copy()
         self._host = None
         self._port = None
         self._proxy_host = None
@@ -45,6 +48,8 @@ class Socks5Client:
         self.reader, self.writer = await asyncio.open_connection(proxy_host, proxy_port)
         self.logger.info(f"Connected to SOCKS5 proxy at {proxy_host}:{proxy_port}")
 
+        self.cipher = self.default_cipher.copy()
+        self.udp_cipher = self.default_udp_cipher.copy()
         await self.cipher.client_hello(self, self.reader, self.writer)
 
         methods = [0x00]
