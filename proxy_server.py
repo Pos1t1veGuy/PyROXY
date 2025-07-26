@@ -129,8 +129,8 @@ class Socks5Server:
             else:
                 self.logger.warning(f'Suspicious client connected: {user}')
 
-        except Exception as e:
-            self.logger.error(f"Connection error: {e}")
+        # except Exception as e:
+        #     self.logger.error(f"Connection error: {e}")
 
         finally:
             await user.disconnect()
@@ -150,7 +150,10 @@ class Socks5Server:
                 if encrypt:
                     data = encrypt(data)
 
-                await self.send(user, data)
+                writer.write(data)
+                if self.log_bytes:
+                    self.bytes_sent += len(data)
+                await writer.drain()
         except Exception as e:
             self.logger.error(f"Proxying error: {e}")
         finally:
@@ -158,10 +161,10 @@ class Socks5Server:
             await writer.wait_closed()
 
     async def send(self, user: 'User', data: bytes, log_bytes: bool = True):
-        writer.write(data)
+        user.writer.write(data)
         if self.log_bytes and log_bytes:
             self.bytes_sent += len(data)
-        await writer.drain()
+        await user.writer.drain()
         self.logger.debug(f'Sent {len(data)} bytes to {user}')
 
     async def add_user(self, client_ip: str, client_port: int, writer: asyncio.StreamWriter) -> 'User':
@@ -437,7 +440,7 @@ class ConnectionMethods:
             await client_writer.drain()
             return 1
 
-        self.logger.debug(f'{user} connected to {addr}:{port}')
+        server.logger.debug(f'{user} connected to {addr}:{port}')
         await asyncio.gather(
             server.pipe(client_reader, remote_writer, decrypt=cipher.decrypt), # client -> server
             server.pipe(remote_reader, client_writer, encrypt=cipher.encrypt), # client <- servers
@@ -473,9 +476,15 @@ class ConnectionMethods:
         udp_host = '127.0.0.1' if udp_host == '0.0.0.0' else udp_host
         server.logger.info(f"Started UDP server for {addr}:{port} at {udp_host}:{udp_port}")
 
-        reply = await cipher.server_make_reply(server.socks_version, 0x00, udp_host, udp_port)
-        client_writer.write(reply)
-        await client_writer.drain()
+        try:
+            reply = await cipher.server_make_reply(server.socks_version, 0x00, udp_host, udp_port)
+            client_writer.write(reply)
+            await client_writer.drain()
+        except Exception as e:
+            self.logger.warning(f"Failed to make UDP connection at TCP {addr}:{port}; UDP {udp_host}:{udp_port} => {e}")
+            client_writer.write(await default_cipher.server_make_reply(self.socks_version, 0xFF, '0.0.0.0', 0))
+            await client_writer.drain()
+            return
 
         try:
             while True:

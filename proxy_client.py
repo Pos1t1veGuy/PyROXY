@@ -7,7 +7,7 @@ import struct
 
 from .logger_setup import *
 from .base_cipher import Cipher
-from .proxy_server import Socks5Server, ConnectionMethods
+from .proxy_server import Socks5Server, ConnectionMethods, UDPServerProxy
 
 
 class Socks5Client:
@@ -417,6 +417,35 @@ class UDPClient(asyncio.DatagramProtocol):
         return f'{self.__class__.__name__}(host="{self.host}", port={self.port})'
 
 
+class UDPServerProxyListener(UDPServerProxy):
+    def __init__(self, remote_host: str, remote_port: int, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.remote_host = remote_host
+        self.remote_port = remote_port
+
+    def datagram_received(self, data: bytes, addr: Tuple[str, int]):
+        self.last_activity = time.time()
+        self.logger.debug(f"{self} datagram from {addr}")
+
+        if self.client_addr is None:
+            self.client_addr = addr
+
+        try:
+            if addr == self.client_addr: # from client
+                self.transport.sendto(self.cipher.encrypt(data), (self.remote_host, self.remote_port))
+                self.logger.debug(
+                    f"{self.client_addr}->UDP->{self.remote_host}:{self.remote_port} translated {len(data)} bytes"
+                )
+            elif self.client_addr: # from server
+                self.transport.sendto(self.cipher.decrypt(data), self.client_addr)
+                self.logger.debug(
+                    f"{self.client_addr}<-UDP<-{self.remote_host}:{self.remote_port} translated {len(data)} bytes"
+                )
+
+        except Exception as e:
+            self.logger.error(f"UDP relay error: {e}")
+
+
 class Socks5Listener(Socks5Client):
     def __init__(self, remote_host: str, remote_port: int, username: str = '', password: str = '', *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -446,8 +475,9 @@ class Socks5Listener(Socks5Client):
 
         # Connecting to the local proxy, getting a command
         self.logger.debug('Local client connecting...')
+        user = await self.local_server.handshake(client_reader, client_writer, default_cipher)
         try:
-            user = await self.local_server.handshake(client_reader, client_writer, default_cipher)
+            ...
         except Exception as e:
             self.logger.error(
                 f"Can not do handshake to local proxy {self.local_server.host}:{self.local_server.port} — {e}"
@@ -475,6 +505,7 @@ class Socks5Listener(Socks5Client):
             return
         self.logger.debug(f'Client {user} handshaked with remote server')
 
+
         if command == ConnectionMethods.CONNECT:
             cmd_bytes = await remote_cipher.client_command(
                 self.socks_version, self.user_commands['connect'], addr, port
@@ -500,13 +531,69 @@ class Socks5Listener(Socks5Client):
             )
             self.logger.debug(f"TCP connection to {addr}:{port} is closed")
 
+
         elif command == ConnectionMethods.UDP_ASSOCIATE:
-            self.logger.logger.debug("Starting UDP server...")
+            self.logger.debug("Starting UDP server...")
             cmd_bytes = await remote_cipher.client_command(
                 self.socks_version, self.user_commands['associate'], addr, port
             )
             await self.asend(cmd_bytes, encrypt=False, log_bytes=False)
             address, port = await remote_cipher.client_connect_confirm(self.reader)
+
+            self.logger.debug(f"Establishing UDP connection to {address}:{port}...")
+            loop = asyncio.get_running_loop()
+
+            try:
+                transport, protocol = await loop.create_datagram_endpoint(
+                    lambda: UDPServerProxyListener(self.remote_host, self.remote_port, self.local_server),
+                    local_addr=('0.0.0.0', 0)
+                )
+            except Exception as e:
+                self.logger.error(f"Failed to start UDP relay: {e}")
+                reply = await cipher.server_make_reply(self.socks_version, 0x01, '0.0.0.0', 0)
+                client_writer.write(reply)
+                await client_writer.drain()
+                return 1
+
+            udp_host, udp_port = transport.get_extra_info('sockname')
+            udp_host = '127.0.0.1' if udp_host == '0.0.0.0' else udp_host
+            self.logger.info(f"Started UDP server for {addr}:{port} at {udp_host}:{udp_port}")
+
+            try:
+                reply = await cipher.server_make_reply(self.socks_version, 0x00, udp_host, udp_port)
+                client_writer.write(reply)
+                await client_writer.drain()
+            except Exception as e:
+                self.logger.warning(f"Failed to make UDP connection at TCP {addr}:{port}; UDP {udp_host}:{udp_port} => {e}")
+                client_writer.write(await default_cipher.server_make_reply(self.socks_version, 0xFF, '0.0.0.0', 0))
+                await client_writer.drain()
+                return
+
+            try:
+                while True:
+                    try:
+                        if self.local_server.stop:
+                            self.logger.debug("Server stopping: closing UDP assoc.")
+                            break
+                        if not user.connected:
+                            self.logger.debug("User disconnected: closing UDP assoc.")
+                            break
+
+                        if client_reader.at_eof():
+                            self.logger.debug("TCP reader EOF: closing UDP assoc.")
+                            break
+                        if client_writer.is_closing():
+                            self.logger.debug("TCP writer closing: closing UDP assoc.")
+                            break
+
+                        await asyncio.sleep(.5)
+                    except Exception as e:
+                        self.logger.warning(f"UDP_ASSOCIATE TCP connection error: {e}")
+                        break
+            finally:
+                transport.close()
+
+
         elif command == ConnectionMethods.BIND:
             cmd_bytes = await remote_cipher.client_command(
                 self.socks_version, self.user_commands['bind'], addr, port
