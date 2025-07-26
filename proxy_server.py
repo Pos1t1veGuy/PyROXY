@@ -77,11 +77,11 @@ class Socks5Server:
         if methods['supports_no_auth'] and self.accept_anonymous:
             logging.info(f'{user} authorizing as Anonynous')
             data = await cipher.server_send_method_to_user(self.socks_version, 0x00)
-            await self.send(writer, data, log_bytes=False)
+            await self.send(user, data, log_bytes=False)
         elif methods['supports_user_pass']:
             logging.info(f'{user} authorizing with username:password')
             data = await cipher.server_send_method_to_user(self.socks_version, 0x02)
-            await self.send(writer, data, log_bytes=False)
+            await self.send(user, data, log_bytes=False)
 
             auth_data = await cipher.server_auth_userpass(self.users_auth_data, reader, writer)
             if not auth_data:
@@ -90,11 +90,11 @@ class Socks5Server:
             user.username, user.password = auth_data
         else:
             data = await cipher.server_send_method_to_user(self.socks_version, 0xFF)
-            await self.send(writer, data, log_bytes=False)
+            await self.send(user, data, log_bytes=False)
             raise ConnectionError(f'Can not use authentication method {user}')
 
         user.handshaked = True
-        logging.info(f'{user} is handshaked')
+        logging.debug(f'{user} is handshaked')
         return user
 
 
@@ -109,16 +109,19 @@ class Socks5Server:
                 self.logger.warning(f"Blocked connection from non-whitelisted IP: {client_ip}")
                 return
         user = await self.add_user(client_ip, client_port, writer)
-        logging.info(f'{user} is connecting...')
+        logging.debug(f'{user} is connecting...')
         cipher = self.cipher.copy()
 
         try:
             if await cipher.server_hello(self, reader, writer):
+                self.logger.debug(f"Sent server_hello")
                 await self.handshake(reader, writer, cipher, user=user)
 
+                self.logger.info(f"{user} is connected")
                 addr, port, command = await cipher.server_handle_command(
                     self.socks_version, self.user_commands, reader
                 )
+                self.logger.info(f'Client {user} sent command {command.__qualname__}')
 
                 connection_result = await command(self, addr, port, user, cipher, reader, writer)
                 self.logger.info(f'Сompleted the operation successfully, code: {connection_result}')
@@ -147,18 +150,19 @@ class Socks5Server:
                 if encrypt:
                     data = encrypt(data)
 
-                await self.send(writer, data)
+                await self.send(user, data)
         except Exception as e:
             self.logger.error(f"Proxying error: {e}")
         finally:
             writer.close()
             await writer.wait_closed()
 
-    async def send(self, writer: asyncio.StreamWriter, data: bytes, log_bytes: bool = True):
+    async def send(self, user: 'User', data: bytes, log_bytes: bool = True):
         writer.write(data)
         if self.log_bytes and log_bytes:
             self.bytes_sent += len(data)
         await writer.drain()
+        self.logger.debug(f'Sent {len(data)} bytes to {user}')
 
     async def add_user(self, client_ip: str, client_port: int, writer: asyncio.StreamWriter) -> 'User':
         user = User(self, client_ip, client_port, writer=writer)
@@ -257,14 +261,14 @@ class UDPServerProxy(asyncio.DatagramProtocol):
         self.transport = transport
         self.host, self.port = transport.get_extra_info('sockname')
         self.last_activity = time.time()
-        self.logger.debug(f"UDP server started on {self.host}:{self.port}")
+        self.logger.debug(f"{self} started")
         asyncio.create_task(self.monitor_timeout())
 
     async def monitor_timeout(self):
         while not self.stop:
             await asyncio.sleep(1)
             if time.time() - self.last_activity > self.timeout:
-                self.logger.debug("UDP timeout reached. Closing UDP server.")
+                self.logger.debug(f"{self} timeout reached. Closing...")
                 self.transport.close()
                 self.stop = True
 
@@ -409,7 +413,7 @@ class UDPServerProxy(asyncio.DatagramProtocol):
 
     def connection_lost(self, exc):
         self.stop = True
-        self.logger.info(f"UDP transport closed: {exc}")
+        self.logger.info(f"{self} transport closed: {exc}")
 
     def __str__(self):
         host_port = f"{self.host}:{self.port}, " if self.host and self.port else ""
@@ -420,7 +424,7 @@ class ConnectionMethods:
     @staticmethod
     async def CONNECT(server: Socks5Server, addr: str, port: int, user: User, cipher: Cipher,
                              client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> int:
-        server.logger.debug(f"Establishing TCP connection to {addr}:{port}...")
+        server.logger.debug(f"Establishing TCP connection for {user} to {addr}:{port}...")
 
         try:
             remote_reader, remote_writer = await asyncio.open_connection(addr, port)
@@ -433,6 +437,7 @@ class ConnectionMethods:
             await client_writer.drain()
             return 1
 
+        self.logger.debug(f'{user} connected to {addr}:{port}')
         await asyncio.gather(
             server.pipe(client_reader, remote_writer, decrypt=cipher.decrypt), # client -> server
             server.pipe(remote_reader, client_writer, encrypt=cipher.encrypt), # client <- servers
@@ -495,7 +500,6 @@ class ConnectionMethods:
                     break
         finally:
             transport.close()
-            server.logger.debug("UDP server closed")
 
         return 0
 

@@ -47,11 +47,14 @@ class Socks5Client:
     async def handshake(self, proxy_host: str = '127.0.0.1', proxy_port: int = 1080,
                         username: Optional[str] = None, password: Optional[str] = None):
         self.reader, self.writer = await asyncio.open_connection(proxy_host, proxy_port)
-        self.logger.info(f"Connected to SOCKS5 proxy at {proxy_host}:{proxy_port}")
+        self.logger.info(
+            f"Connected to SOCKS5 proxy at {proxy_host}:{proxy_port} using cipher {self.cipher.__class__.__name__}"
+        )
 
         self.cipher = self.default_cipher.copy()
         self.udp_cipher = self.default_udp_cipher.copy()
         await self.cipher.client_hello(self, self.reader, self.writer)
+        self.logger.debug("Sent client_hello")
 
         methods = [0x00]
         if username and password:
@@ -60,24 +63,31 @@ class Socks5Client:
         methods_msg = await self.cipher.client_send_methods(self.socks_version, methods)
         await self.asend(methods_msg, encrypt=False, log_bytes=False)
         method_chosen = await self.cipher.client_get_method(self.socks_version, self.reader)
+        self.logger.debug("Sent client_hello")
 
-        if method_chosen == 0xFF:
-            raise ConnectionError("No acceptable authentication methods.")
+        try:
+            if method_chosen == 0xFF:
+                raise ConnectionError("No acceptable authentication methods.")
 
-        if method_chosen == 0x02:
-            if not username or not password:
-                raise ConnectionError("Proxy requires username/password authentication, but none provided")
+            if method_chosen == 0x02:
+                if not username or not password:
+                    raise ConnectionError("Proxy requires username/password authentication, but none provided")
 
-            auth_ok = await self.cipher.client_auth_userpass(username, password, self.reader, self.writer)
-            if not auth_ok:
-                raise ConnectionError("Authentication failed")
-            self.logger.info("Authenticated successfully")
+                auth_ok = await self.cipher.client_auth_userpass(username, password, self.reader, self.writer)
+                if not auth_ok:
+                    raise ConnectionError("Authentication failed")
+                self.logger.info("Authenticated successfully")
 
-        elif method_chosen == 0x00:
-            self.logger.info("No authentication required by proxy")
+            elif method_chosen == 0x00:
+                self.logger.info("No authentication required by proxy")
 
-        else:
-            raise ConnectionError(f"Unsupported authentication method selected by proxy: {method_chosen}")
+            else:
+                raise ConnectionError(f"Unsupported authentication method selected by proxy: {method_chosen}")
+
+            self.logger.debug("Handshaked")
+        except Exception as ex:
+            self.logger.error(ex)
+            raise ex
 
 
     async def async_connect(self, target_host: str, target_port: int,
@@ -97,7 +107,7 @@ class Socks5Client:
         self._proxy_host = proxy_host
         self._proxy_port = proxy_port
         self.connected = True
-        self.logger.info(f"Connected to {target_host}:{target_port} through proxy")
+        self.logger.debug(f"Connected to {target_host}:{target_port} through proxy")
 
     def connect(self, target_host: str, target_port: int,
                 proxy_host: str = '127.0.0.1', proxy_port: int = 1080,
@@ -126,6 +136,7 @@ class Socks5Client:
         self._proxy_port = proxy_port
         self.udp_socket = await self._get_udp_socket(udp_host, udp_port)
 
+        self.logger.debug(f"Got an associated UDP server {udp_host}:{udp_port} through proxy")
         return udp_host, udp_port
 
     def udp_associate(self, target_host: str, target_port: int,
@@ -151,6 +162,7 @@ class Socks5Client:
         self.writer.write(data)
         if wait:
             await self.writer.drain()
+        self.logger.debug(f"Sent {len(data)} bytes to TCP proxy {self._proxy_host}:{self._proxy_port}")
 
     def send(self, data: bytes, encrypt: bool = True):
         return self._loop.run_until_complete(self.asend(data, encrypt=encrypt))
@@ -182,6 +194,8 @@ class Socks5Client:
         else:
             data = self._pt_buffer[:num_bytes]
             del self._pt_buffer[:num_bytes]
+
+        self.logger.debug(f"Readed {len(data)} bytes from TCP proxy {self._proxy_host}:{self._proxy_port}")
         return data
 
     def read(self, num_bytes: int = -1, **kwargs) -> bytes:
@@ -201,6 +215,8 @@ class Socks5Client:
         else:
             data = self._pt_buffer[:num_bytes]
             del self._pt_buffer[:num_bytes]
+
+        self.logger.debug(f"Readed {len(data)} bytes from TCP proxy {self._proxy_host}:{self._proxy_port}")
         return data
 
     def readexactly(self, num_bytes: int, **kwargs) -> bytes:
@@ -214,6 +230,7 @@ class Socks5Client:
         if pos != -1:
             data = self._pt_buffer[:pos + len(sep)]
             del self._pt_buffer[:pos + len(sep)]
+            self.logger.debug(f"Readed {len(data)} bytes from TCP proxy {self._proxy_host}:{self._proxy_port}")
             return data
 
         if not decrypt:
@@ -223,6 +240,9 @@ class Socks5Client:
                 data = e.partial
             if self.log_bytes and log_bytes:
                 self.bytes_received += len(data)
+                self.logger.debug(
+                    f"Readed {len(self._pt_buffer + data)} bytes from TCP proxy {self._proxy_host}:{self._proxy_port}"
+                )
             return self._pt_buffer + data
 
         while True:
@@ -239,10 +259,12 @@ class Socks5Client:
             if pos != -1:
                 data = self._pt_buffer[:pos + len(sep)]
                 del self._pt_buffer[:pos + len(sep)]
+                self.logger.debug(f"Readed {len(data)} bytes from TCP proxy {self._proxy_host}:{self._proxy_port}")
                 return data
 
         data = self._pt_buffer
         self._pt_buffer = bytearray()
+        self.logger.debug(f"Readed {len(data)} bytes from TCP proxy {self._proxy_host}:{self._proxy_port}")
         return data
 
     def readuntil(self, **kwargs) -> bytes:
@@ -258,6 +280,7 @@ class Socks5Client:
 
 
     async def udp_send(self, data: bytes):
+        self.logger.debug(f"Sent {len(data)} bytes to UDP proxy {self._udp_proxy_host}:{self._udp_proxy_port}")
         return self.udp_send(data)
 
     def udp_send(self, data: bytes):
@@ -271,6 +294,7 @@ class Socks5Client:
 
     async def async_udp_recv(self, timeout: int = 5) -> Tuple[bytes, Tuple[str, int]]:
         data = await asyncio.wait_for(self.udp_socket.recv(), timeout=timeout)
+        self.logger.debug(f"Readed {len(data)} bytes from UDP proxy {self._udp_proxy_host}:{self._udp_proxy_port}")
         return self.udp_cipher.decrypt(data[0]), data[1]
 
     def udp_recv(self, timeout: int = 5) -> Tuple[bytes, Tuple[str, int]]:
@@ -347,7 +371,7 @@ class UDPClient(asyncio.DatagramProtocol):
         self.logger.debug(f"Server {self} has client connected {self.client_ip}:{self.client_port}")
 
     def datagram_received(self, data, addr):
-        self.client_ip, self.client_port = self.transport.get_extra_info("peername")
+        self.client_ip, self.client_port = addr
         self.recv_queue.put_nowait((data, addr))
 
     def error_received(self, exc):
