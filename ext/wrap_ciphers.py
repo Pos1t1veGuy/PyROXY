@@ -102,7 +102,7 @@ class AESCipherCTR_HTTPWS(AESCipherCTR):
 
     async def client_command(self, socks_version: int, user_command: int, target_host: str, target_port: int) -> bytes:
         return self.encrypt(
-            await Cipher.client_command(socks_version, user_command, target_host, target_port), wrap=True
+            await Cipher.client_command(self, socks_version, user_command, target_host, target_port), wrap=True
         )
 
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
@@ -142,7 +142,7 @@ class AESCipherCTR_HTTPWS(AESCipherCTR):
 
     async def server_make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> bytes:
         return self.encrypt(
-            await Cipher.server_make_reply(socks_version, reply_code, address=address, port=port), wrap=True
+            await Cipher.server_make_reply(self, socks_version, reply_code, address=address, port=port), wrap=True
         )
 
     async def client_connect_confirm(self, reader: asyncio.StreamReader) -> Tuple[str, str]:

@@ -73,13 +73,12 @@ class Socks5Server:
 
         methods = await cipher.server_get_methods(self.socks_version, reader)
 
-        print(123)
         if methods['supports_no_auth'] and self.accept_anonymous:
-            logging.info(f'{user} authorizing as Anonynous')
+            self.logger.debug(f'{user} authorizing as Anonynous')
             data = await cipher.server_send_method_to_user(self.socks_version, 0x00)
             await self.send(user, data, log_bytes=False)
         elif methods['supports_user_pass']:
-            logging.info(f'{user} authorizing with username:password')
+            self.logger.debug(f'{user} authorizing with username:password')
             data = await cipher.server_send_method_to_user(self.socks_version, 0x02)
             await self.send(user, data, log_bytes=False)
 
@@ -94,7 +93,7 @@ class Socks5Server:
             raise ConnectionError(f'Can not use authentication method {user}')
 
         user.handshaked = True
-        logging.debug(f'{user} is handshaked')
+        self.logger.debug(f'{user} is handshaked')
         return user
 
 
@@ -443,13 +442,13 @@ class ConnectionMethods:
             return 1
 
         server.logger.debug(f'{user} connected to {addr}:{port}')
-        # try:
-        await asyncio.gather(
-            server.pipe(client_reader, remote_writer, decrypt=cipher.decrypt, name='client -> server'),
-            server.pipe(remote_reader, client_writer, encrypt=cipher.encrypt, name='client <- servers'),
-        )
-        # except (ConnectionResetError, OSError):
-        #     pass
+        try:
+            await asyncio.gather(
+                server.pipe(client_reader, remote_writer, decrypt=cipher.decrypt, name='client -> server'),
+                server.pipe(remote_reader, client_writer, encrypt=cipher.encrypt, name='client <- servers'),
+            )
+        except (ConnectionResetError, OSError):
+            pass
         server.logger.debug(f"TCP connection to {addr}:{port} is closed")
         return 0
 
