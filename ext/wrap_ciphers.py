@@ -1,3 +1,4 @@
+import traceback
 from typing import *
 import asyncio
 import socket
@@ -43,7 +44,7 @@ class AESCipherCTR_HTTPWS(AESCipherCTR):
         }
 
     async def server_send_method_to_user(self, socks_version: int, method: int) -> bytes:
-        return self.encrypt(struct.pack("!BB", socks_version, method))
+        return self.encrypt(struct.pack("!BB", socks_version, method), wrap=True)
 
     async def client_get_method(self, socks_version: int, reader: asyncio.StreamReader) -> int:
         header, length, mask = await self.wrapper.cut_ws_header(reader)
@@ -73,11 +74,11 @@ class AESCipherCTR_HTTPWS(AESCipherCTR):
         password = self.decrypt(password, mask=mask, wrap=False).decode()
 
         if logins.get(username) == password:
-            writer.write(self.encrypt(struct.pack("!BB", 1, 0)))
+            writer.write(self.encrypt(struct.pack("!BB", 1, 0), wrap=True))
             await writer.drain()
             return username, password
         else:
-            writer.write(self.encrypt(struct.pack("!BB", 1, 1)))
+            writer.write(self.encrypt(struct.pack("!BB", 1, 1), wrap=True))
             await writer.drain()
 
     async def client_auth_userpass(self, username: str, password: str, reader: asyncio.StreamReader,
@@ -85,7 +86,7 @@ class AESCipherCTR_HTTPWS(AESCipherCTR):
         username_bytes = username.encode()
         password_bytes = password.encode()
 
-        writer.write(self.encrypt(struct.pack("!BB", 1, len(username_bytes))))
+        writer.write(self.encrypt(struct.pack("!BB", 1, len(username_bytes)), wrap=True))
         writer.write(self.encrypt(username_bytes, wrap=False))
         writer.write(self.encrypt(bytes([len(password_bytes)]), wrap=False))
         writer.write(self.encrypt(password_bytes, wrap=False))
@@ -102,14 +103,14 @@ class AESCipherCTR_HTTPWS(AESCipherCTR):
 
     async def client_command(self, socks_version: int, user_command: int, target_host: str, target_port: int) -> bytes:
         return self.encrypt(
-            await Cipher.client_command(socks_version, user_command, target_host, target_port)
+            await Cipher.client_command(socks_version, user_command, target_host, target_port), wrap=True
         )
 
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
                                     reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:
         header, length, mask = await self.wrapper.cut_ws_header(reader)
         raw = await reader.readexactly(4)
-        version, cmd, rsv, address_type = self.decryptor.decrypt(raw)
+        version, cmd, rsv, address_type = self.decrypt(raw, mask=mask, wrap=False)
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
 
@@ -142,7 +143,7 @@ class AESCipherCTR_HTTPWS(AESCipherCTR):
 
     async def server_make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> bytes:
         return self.encrypt(
-            await Cipher.server_make_reply(socks_version, reply_code, address=address, port=port)
+            await Cipher.server_make_reply(socks_version, reply_code, address=address, port=port), wrap=True
         )
 
     async def client_connect_confirm(self, reader: asyncio.StreamReader) -> Tuple[str, str]:
@@ -176,8 +177,9 @@ class AESCipherCTR_HTTPWS(AESCipherCTR):
         return address, struct.unpack('!H', port_bytes)[0]
 
 
-    def encrypt(self, data: bytes, wrap: bool = True, mask: bool = False) -> bytes:
+    def encrypt(self, data: bytes, wrap: bool = False, mask: bool = False, wrap1: bool = False) -> bytes:
         data = super().encrypt(data)
+
         if wrap:
             return self.wrapper.wrap(data, mask=self.is_client and mask)
         elif mask:
@@ -185,9 +187,9 @@ class AESCipherCTR_HTTPWS(AESCipherCTR):
         else:
             return data
 
-    def decrypt(self, data: bytes, wrap: bool = True, mask: bytes = b'') -> bytes:
+    def decrypt(self, data: bytes, wrap: bool = False, mask: bytes = b'') -> bytes:
         if wrap:
             data = self.wrapper.unwrap(data)
-        elif mask:
+        elif mask != b'':
             data = self.wrapper.mask(data, mask)
         return super().decrypt(data)

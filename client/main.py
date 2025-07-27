@@ -35,7 +35,7 @@ config = json.load(open(config_file, 'r', encoding='utf-8'))
 
 CLIENT = Socks5_TCP_Retranslator(
     config['remote_proxy_host'], int(config['remote_proxy_port']),
-    cipher=AESCipherCTR(key=hashlib.sha256(key).digest(), iv=os.urandom(16)),
+    cipher=AESCipherCTR_HTTPWS(key=hashlib.sha256(key).digest(), iv=os.urandom(16)),
     udp_cipher=AESCipherCTR(key=hashlib.sha256(key).digest()),
     username=config['username'],
     password=config['password'],

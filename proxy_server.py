@@ -129,42 +129,40 @@ class Socks5Server:
             else:
                 self.logger.warning(f'Suspicious client connected: {user}')
 
-        except (ConnectionResetError, OSError):
-            self.logger.error(f"Client {user} is disconnected")
+        # except (ConnectionResetError, OSError):
+        #     self.logger.error(f"Client {user} is disconnected")
 
-        except Exception as e:
-            self.logger.error(f"Connection error: {e}")
+        # except Exception as e:
+        #     self.logger.error(f"Connection error: {e}")
 
         finally:
             await user.disconnect()
 
-    async def pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+    async def pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, name: str = 'default',
                    encrypt: Optional[callable] = None, decrypt: Optional[callable] = None):
         try:
-            try:
-                while not reader.at_eof():
-                    data = await reader.read(4096)
-                    if not data:
-                        break
-                    if self.log_bytes:
-                        self.bytes_received += len(data)
+            while not reader.at_eof():
+                data = await reader.read(4096)
+                if not data:
+                    break
+                if self.log_bytes:
+                    self.bytes_received += len(data)
 
-                    if decrypt:
-                        data = decrypt(data)
-                    if encrypt:
-                        data = encrypt(data)
+                if decrypt:
+                    data = decrypt(data)
+                if encrypt:
+                    data = encrypt(data)
 
-                    writer.write(data)
-                    if self.log_bytes:
-                        self.bytes_sent += len(data)
-                    await writer.drain()
-            except Exception as e:
-                self.logger.error(f"Proxying error: {e}")
-            finally:
-                writer.close()
-                await writer.wait_closed()
-        except (ConnectionResetError, OSError):
-            self.logger.error(f"Client disconnected")
+                writer.write(data)
+                if self.log_bytes:
+                    self.bytes_sent += len(data)
+                await writer.drain()
+        except Exception as e:
+            self.logger.error(f"Proxying PIPE '{name}' error: {e}")
+            traceback.print_stack(e)
+        finally:
+            writer.close()
+            await writer.wait_closed()
 
     async def send(self, user: 'User', data: bytes, log_bytes: bool = True):
         user.writer.write(data)
@@ -446,10 +444,13 @@ class ConnectionMethods:
             return 1
 
         server.logger.debug(f'{user} connected to {addr}:{port}')
+        # try:
         await asyncio.gather(
-            server.pipe(client_reader, remote_writer, decrypt=cipher.decrypt), # client -> server
-            server.pipe(remote_reader, client_writer, encrypt=cipher.encrypt), # client <- servers
+            server.pipe(client_reader, remote_writer, decrypt=cipher.decrypt, name='client -> server'),
+            server.pipe(remote_reader, client_writer, encrypt=cipher.encrypt, name='client <- servers'),
         )
+        # except (ConnectionResetError, OSError):
+        #     pass
         server.logger.debug(f"TCP connection to {addr}:{port} is closed")
         return 0
 

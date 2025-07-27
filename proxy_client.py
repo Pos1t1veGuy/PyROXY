@@ -3,6 +3,7 @@ import asyncio
 import socket
 import logging
 import ipaddress
+import traceback
 import struct
 
 from .logger_setup import *
@@ -41,16 +42,16 @@ class Socks5Client:
         self.logger.info(
             f"Connected to SOCKS5 proxy at {proxy_host}:{proxy_port} using cipher {self.cipher.__class__.__name__}"
         )
-        await cipher.client_hello(self, reader, writer)
+        await session.cipher.client_hello(self, reader, writer)
         self.logger.debug("Sent client_hello")
 
         methods = [0x00]
         if username and password:
             methods.insert(0, 0x02)
 
-        methods_msg = await cipher.client_send_methods(self.socks_version, methods)
+        methods_msg = await session.cipher.client_send_methods(self.socks_version, methods)
         await session.asend(methods_msg, encrypt=False, log_bytes=False)
-        method_chosen = await cipher.client_get_method(self.socks_version, reader)
+        method_chosen = await session.cipher.client_get_method(self.socks_version, reader)
         self.logger.debug("Sent client_hello")
 
         try:
@@ -61,7 +62,7 @@ class Socks5Client:
                 if not username or not password:
                     raise ConnectionError("Proxy requires username/password authentication, but none provided")
 
-                auth_ok = await cipher.client_auth_userpass(username, password, reader, writer)
+                auth_ok = await session.cipher.client_auth_userpass(username, password, reader, writer)
                 if not auth_ok:
                     raise ConnectionError("Authentication failed")
                 self.logger.info("Authenticated successfully")
@@ -315,7 +316,6 @@ class TCP_ProxySession:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.sync_close()
 
-
 class UDP_ProxySession(asyncio.DatagramProtocol):
     def __init__(self, cipher: 'Cipher'):
         self.transport = None
@@ -450,7 +450,6 @@ class Socks5_UDP_Retranslator(UDPServerProxy):
         except Exception as e:
             self.logger.error(f"UDP relay error: {e}")
 
-
 class Socks5_TCP_Retranslator(Socks5Client):
     def __init__(self, remote_host: str, remote_port: int, username: str = '', password: str = '', *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -480,6 +479,14 @@ class Socks5_TCP_Retranslator(Socks5Client):
         except (ConnectionResetError, OSError):
             self.logger.info('Server closed')
 
+    def listen_and_forward(self, *args, **kwargs):
+        try:
+            asyncio.run(self.async_listen_and_forward(*args, **kwargs))
+        except KeyboardInterrupt:
+            self.logger.info('Client closed')
+        except (ConnectionResetError, OSError):
+            self.logger.info('Server closed')
+
     async def handle_local_client(self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter):
         default_cipher = self.local_server.cipher.copy()
 
@@ -502,15 +509,15 @@ class Socks5_TCP_Retranslator(Socks5Client):
         self.logger.info(f'Local client {user} sent command {command.__qualname__}')
 
         # Connecting to the remote proxy, sending command
-        try:
-            remote_session = await self.handshake(
-                proxy_host=self.remote_host, proxy_port=self.remote_port,username=self.username, password=self.password
-            )
-        except Exception as e:
-            self.logger.error(f"Can not do handshake to remote proxy {self.remote_host}:{self.remote_port} — {e}")
-            client_writer.close()
-            await client_writer.wait_closed()
-            return
+        # try:
+        remote_session = await self.handshake(
+            proxy_host=self.remote_host, proxy_port=self.remote_port,username=self.username, password=self.password
+        )
+        # except Exception as e:
+        #     self.logger.error(f"Can not do handshake to remote proxy {self.remote_host}:{self.remote_port} — {e}")
+        #     client_writer.close()
+        #     await client_writer.wait_closed()
+        #     return
         self.logger.debug(f'Client {user} handshaked with remote server')
 
 
@@ -533,10 +540,13 @@ class Socks5_TCP_Retranslator(Socks5Client):
                 await client_writer.drain()
                 return
 
+            # try:
             await asyncio.gather(
-                self.pipe(client_reader, remote_session.writer, encrypt=remote_session.cipher.encrypt),  # client -> server
-                self.pipe(remote_session.reader, client_writer, decrypt=remote_session.cipher.decrypt),  # client <- server
+                self.pipe(client_reader, remote_session.writer, encrypt=remote_session.cipher.encrypt, name='client -> server'),
+                self.pipe(remote_session.reader, client_writer, decrypt=remote_session.cipher.decrypt, name='client <- server'),
             )
+            # except (ConnectionResetError, OSError):
+            #     pass
             self.logger.debug(f"TCP connection to {addr}:{port} is closed")
 
 
@@ -606,12 +616,9 @@ class Socks5_TCP_Retranslator(Socks5Client):
             await remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False)
             address, port = await remote_session.cipher.client_connect_confirm(reader)
 
-    def listen_and_forward(self, *args, **kwargs):
-        asyncio.run(self.async_listen_and_forward(*args, **kwargs))
 
-
-    async def pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
-                   encrypt: Optional[callable] = None, decrypt: Optional[callable] = None):
+    async def pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, name: str = 'default',
+                   encrypt: Optional[callable] = None, decrypt: Optional[callable] = None) -> int:
         try:
             while not reader.at_eof():
                 data = await reader.read(4096)
@@ -621,16 +628,16 @@ class Socks5_TCP_Retranslator(Socks5Client):
                     self.bytes_received += len(data)
 
                 if decrypt:
-                    data = decrypt(data)
+                    data = decrypt(data, wrap=False)
                 if encrypt:
-                    data = encrypt(data)
+                    data = encrypt(data, wrap=False)
 
                 writer.write(data)
                 if self.log_bytes:
                     self.bytes_sent += len(data)
                 await writer.drain()
         except Exception as e:
-            self.logger.error(f"Proxying error: {e}")
+            self.logger.error(f"Proxying PIPE '{name}' error: {e}")
         finally:
             writer.close()
             await writer.wait_closed()
