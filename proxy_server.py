@@ -128,11 +128,11 @@ class Socks5Server:
             else:
                 self.logger.warning(f'Suspicious client connected: {user}')
 
-        except (ConnectionResetError, OSError):
-            self.logger.error(f"Client {user} is disconnected")
+        # except (ConnectionResetError, OSError):
+        #     self.logger.info(f"Client {user} is disconnected")
 
-        except Exception as e:
-            self.logger.error(f"Connection error: {e}")
+        # except Exception as e:
+        #     self.logger.error(f"Connection error: {e}")
 
         finally:
             await user.disconnect()
