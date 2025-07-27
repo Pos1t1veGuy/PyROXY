@@ -109,7 +109,7 @@ class AESCipherCTR_HTTPWS(AESCipherCTR):
                                     reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:
         header, length, mask = await self.wrapper.cut_ws_header(reader)
         raw = await reader.readexactly(4)
-        version, cmd, rsv, address_type = self.decrypt(raw, mask=mask, wrap=False)
+        version, cmd, rsv, address_type = self.decryptor.decrypt(raw)
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
 

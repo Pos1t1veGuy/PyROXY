@@ -129,8 +129,11 @@ class Socks5Server:
             else:
                 self.logger.warning(f'Suspicious client connected: {user}')
 
-        # except Exception as e:
-        #     self.logger.error(f"Connection error: {e}")
+        except (ConnectionResetError, OSError):
+            self.logger.error(f"Client {user} is disconnected")
+
+        except Exception as e:
+            self.logger.error(f"Connection error: {e}")
 
         finally:
             await user.disconnect()
@@ -138,27 +141,30 @@ class Socks5Server:
     async def pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                    encrypt: Optional[callable] = None, decrypt: Optional[callable] = None):
         try:
-            while not reader.at_eof():
-                data = await reader.read(4096)
-                if not data:
-                    break
-                if self.log_bytes:
-                    self.bytes_received += len(data)
+            try:
+                while not reader.at_eof():
+                    data = await reader.read(4096)
+                    if not data:
+                        break
+                    if self.log_bytes:
+                        self.bytes_received += len(data)
 
-                if decrypt:
-                    data = decrypt(data)
-                if encrypt:
-                    data = encrypt(data)
+                    if decrypt:
+                        data = decrypt(data)
+                    if encrypt:
+                        data = encrypt(data)
 
-                writer.write(data)
-                if self.log_bytes:
-                    self.bytes_sent += len(data)
-                await writer.drain()
-        except Exception as e:
-            self.logger.error(f"Proxying error: {e}")
-        finally:
-            writer.close()
-            await writer.wait_closed()
+                    writer.write(data)
+                    if self.log_bytes:
+                        self.bytes_sent += len(data)
+                    await writer.drain()
+            except Exception as e:
+                self.logger.error(f"Proxying error: {e}")
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        except (ConnectionResetError, OSError):
+            self.logger.error(f"Client disconnected")
 
     async def send(self, user: 'User', data: bytes, log_bytes: bool = True):
         user.writer.write(data)
@@ -342,7 +348,6 @@ class UDPServerProxy(asyncio.DatagramProtocol):
             if atyp == 0x03:
                 try:
                     infos = socket.getaddrinfo(dst_addr, dst_port, type=socket.SOCK_DGRAM)
-                    # getaddrinfo: (family, type, proto, canonname, sockaddr)
                     for fam, *_rest, sockaddr in infos:
                         if fam in (socket.AF_INET, socket.AF_INET6):
                             dst_addr = sockaddr[0]

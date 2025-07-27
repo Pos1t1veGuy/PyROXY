@@ -36,8 +36,9 @@ users = json.load(open(users_file, 'r', encoding='utf-8'))
 SERVER = Socks5Server(
     users=users['users'],
     accept_anonymous=users['accept_anonymous'],
-    cipher=AESCipherCTR_HTTPWS(key=hashlib.sha256(key).digest()),
+    cipher=AESCipherCTR(key=hashlib.sha256(key).digest()),
     udp_cipher=AESCipherCTR(key=hashlib.sha256(key).digest()),
+    port=180,
 )
 SERVER.logger.addHandler(file_handler)
 SERVER.start()
