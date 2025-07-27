@@ -9,14 +9,22 @@ import ipaddress as ipa
 from Cryptodome.Cipher import AES
 from Cryptodome.Util import Counter
 from Cryptodome.Util.Padding import pad, unpad
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
-from ..base_cipher import Cipher, IVCipher
+from ..base_cipher import Cipher
 
 
-class AESCipherCTR(IVCipher):
-    def __init__(self, key: bytes, iv: Optional[bytes] = None):
-        assert len(key) in (16, 24, 32), "AES key must be 128, 192, or 256 bits"
+class AESCipherCTR(Cipher):
+    def __init__(self, key: bytes, iv: Optional[bytes] = None, iv_length: int = 16):
         super().__init__(key, iv=iv)
+        self.key = key
+        self.iv = iv
+        self.iv_length = iv_length
+        self.encryptor = None
+        self.decryptor = None
+
+        if iv is not None:
+            self._init_ciphers(iv)
 
     def _init_ciphers(self, iv: bytes):
         ctr_enc = Counter.new(128, initial_value=int.from_bytes(iv, byteorder='big'))
@@ -36,7 +44,7 @@ class AESCipherCTR(IVCipher):
         return self.iv + self.encrypt(header + methods_bytes)
 
     async def server_get_methods(self, socks_version: int, reader: asyncio.StreamReader) -> Dict[str, bool]:
-        iv = await reader.readexactly(16)
+        iv = await reader.readexactly(self.iv_length)
         self._init_ciphers(iv)
 
         version, nmethods = struct.unpack("!BB", self.decrypt(await reader.readexactly(2)))
@@ -192,14 +200,34 @@ class AESCipherCTR(IVCipher):
             raise OSError(f'{self.__class__.__name__} needs to specify IV (init vector) in constructor or handshake')
 
 
-class AESCipherCBC(AESCipherCTR):
+class AESCipherCBC(Cipher):
+    def __init__(self, key: bytes, iv: Optional[bytes] = None, iv_length: int = 16):
+        super().__init__(key, iv=iv)
+        self.key = key
+        self.iv = iv
+        self.iv_length = iv_length
+        self.encryptor = None
+        self.decryptor = None
+
+        if iv is not None:
+            self._init_ciphers(iv)
+
     def _init_ciphers(self, iv: bytes):
         self.encryptor = AES.new(self.key, AES.MODE_CBC, iv=iv)
         self.decryptor = AES.new(self.key, AES.MODE_CBC, iv=iv)
         self.iv = iv
 
+    async def client_send_methods(self, socks_version: int, methods: List[int]) -> bytes:
+        if self.iv is None:
+            raise ValueError("IV must be initialized before sending methods")
+
+        header = struct.pack("!BB", socks_version, len(methods))
+
+        methods_bytes = struct.pack(f"!{len(methods)}B", *methods)
+        return self.iv + self.encrypt(header + methods_bytes)
+
     async def server_get_methods(self, socks_version: int, reader: asyncio.StreamReader) -> Dict[str, bool]:
-        iv = await reader.readexactly(AES.block_size)
+        iv = await reader.readexactly(self.iv_length)
         self._init_ciphers(iv)
 
         encrypted_header = await reader.readexactly(AES.block_size)
@@ -432,3 +460,64 @@ class AESCipherCBC(AESCipherCTR):
             return unpad(decrypted, AES.block_size)
         else:
             raise OSError(f'{self.__class__.__name__} needs to specify IV (init vector) in constructor or handshake')
+
+
+class ChaCha20_Poly1305(Cipher):
+    def __init__(self, key: bytes, nonce: Optional[bytes] = None, nonce_length: int = 12):
+        super().__init__(key, nonce=nonce)
+        self.key = key
+        self.nonce_length = nonce_length
+        self.nonce = nonce
+        self.cipher = ChaCha20Poly1305(key)
+        self.nonce_counter = 0
+
+    async def client_send_methods(self, socks_version: int, methods: List[int]) -> bytes:
+        if self.nonce is None:
+            raise ValueError("Nonce must be initialized before sending methods")
+
+        header = struct.pack("!BB", socks_version, len(methods))
+
+        methods_bytes = struct.pack(f"!{len(methods)}B", *methods)
+        return self.nonce + self.encrypt(header + methods_bytes)
+
+    async def server_get_methods(self, socks_version: int, reader: asyncio.StreamReader) -> Dict[str, bool]:
+        self.nonce = await reader.readexactly(self.nonce_length)
+        version, nmethods = struct.unpack("!BB", self.decrypt(await reader.readexactly(2 + 16)))
+
+        if version != socks_version:
+            raise ConnectionError(f"Unsupported SOCKS version: {version}")
+
+        encrypted_methods = await reader.readexactly(nmethods)
+        methods = self.decrypt(encrypted_methods)
+
+        return {
+            'supports_no_auth': 0x00 in methods,
+            'supports_user_pass': 0x02 in methods
+        }
+
+    async def server_send_method_to_user(self, socks_version: int, method: int) -> bytes:
+        return self.encrypt(struct.pack("!BB", socks_version, method))
+
+    async def client_get_method(self, socks_version: int, reader: asyncio.StreamReader) -> int:
+        enc = await reader.readexactly(2 + 16)
+        version, method = struct.unpack("!BB", self.decrypt(enc))
+
+        if version != socks_version:
+            raise ConnectionError(f"Unsupported SOCKS version: {version}")
+        if method == 0xFF:
+            raise ConnectionError("No acceptable authentication methods.")
+
+        return method
+
+
+
+    def encrypt(self, data: bytes) -> bytes:
+        if self.nonce is None:
+            raise ValueError("Nonce must be set before encryption")
+        return self.cipher.encrypt(self.nonce, data, None)
+
+    def decrypt(self, data: bytes) -> bytes:
+        if self.nonce is None:
+            raise ValueError("Nonce must be set before decryption")
+        print(self.nonce, data, None)
+        return self.cipher.decrypt(self.nonce, data, None)

@@ -5,7 +5,6 @@ import os
 import struct
 import socket
 import time
-import traceback
 
 from .logger_setup import *
 from .base_cipher import Cipher
@@ -74,6 +73,7 @@ class Socks5Server:
 
         methods = await cipher.server_get_methods(self.socks_version, reader)
 
+        print(123)
         if methods['supports_no_auth'] and self.accept_anonymous:
             logging.info(f'{user} authorizing as Anonynous')
             data = await cipher.server_send_method_to_user(self.socks_version, 0x00)
@@ -159,7 +159,6 @@ class Socks5Server:
                 await writer.drain()
         except Exception as e:
             self.logger.error(f"Proxying PIPE '{name}' error: {e}")
-            traceback.print_stack(e)
         finally:
             writer.close()
             await writer.wait_closed()

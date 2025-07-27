@@ -3,7 +3,6 @@ import asyncio
 import socket
 import logging
 import ipaddress
-import traceback
 import struct
 
 from .logger_setup import *
@@ -16,7 +15,7 @@ class Socks5Client:
         self.socks_version = 5
         self.log_bytes = log_bytes # only after handshake
         self.cipher = Cipher() if cipher is None else cipher
-        self.udp_cipher = udp_cipher.copy()
+        self.udp_cipher = Cipher() if udp_cipher is None else udp_cipher
         self.udp_socket = None
         self.bytes_sent = 0
         self.bytes_received = 0
@@ -151,7 +150,7 @@ class Socks5Client:
         self.sync_close()
 
     def __str__(self):
-        return f'{self.__class__.__name__}({len(self.sessions)} connections, cipher={self.cipher})'
+        return f'{self.__class__.__name__}({len(self.sessions)} connections, cipher={self.cipher.__class__.__name__})'
 
 class TCP_ProxySession:
     def __init__(self, client: Socks5Client, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
