@@ -475,8 +475,6 @@ class Socks5_TCP_Retranslator(Socks5Client):
             await self.local_server.async_start()
         except KeyboardInterrupt:
             self.logger.info('Client closed')
-        except (ConnectionResetError, OSError):
-            self.logger.info('Server closed')
 
     def listen_and_forward(self, *args, **kwargs):
         try:
@@ -501,22 +499,27 @@ class Socks5_TCP_Retranslator(Socks5Client):
             await client_writer.wait_closed()
             return
         self.logger.info(f'Local client connected {user}')
-
         addr, port, command = await default_cipher.server_handle_command(
             self.socks_version, self.local_server.user_commands, client_reader
         )
         self.logger.info(f'Local client {user} sent command {command.__qualname__}')
 
         # Connecting to the remote proxy, sending command
-        # try:
-        remote_session = await self.handshake(
-            proxy_host=self.remote_host, proxy_port=self.remote_port,username=self.username, password=self.password
-        )
-        # except Exception as e:
-        #     self.logger.error(f"Can not do handshake to remote proxy {self.remote_host}:{self.remote_port} — {e}")
-        #     client_writer.close()
-        #     await client_writer.wait_closed()
-        #     return
+        try:
+            remote_session = await self.handshake(
+                proxy_host=self.remote_host, proxy_port=self.remote_port,username=self.username, password=self.password
+            )
+        except ConnectionRefusedError:
+            self.logger.error(f"The server is not started {self.remote_host}:{self.remote_port}")
+            client_writer.close()
+            await client_writer.wait_closed()
+            return
+
+        except Exception as e:
+            self.logger.error(f"Can not do handshake to remote proxy {self.remote_host}:{self.remote_port} — {e}")
+            client_writer.close()
+            await client_writer.wait_closed()
+            return
         self.logger.debug(f'Client {user} handshaked with remote server')
 
 
@@ -539,13 +542,13 @@ class Socks5_TCP_Retranslator(Socks5Client):
                 await client_writer.drain()
                 return
 
-            # try:
-            await asyncio.gather(
-                self.pipe(client_reader, remote_session.writer, encrypt=remote_session.cipher.encrypt, name='client -> server'),
-                self.pipe(remote_session.reader, client_writer, decrypt=remote_session.cipher.decrypt, name='client <- server'),
-            )
-            # except (ConnectionResetError, OSError):
-            #     pass
+            try:
+                await asyncio.gather(
+                    self.pipe(client_reader, remote_session.writer, encrypt=remote_session.cipher.encrypt, name='client -> server'),
+                    self.pipe(remote_session.reader, client_writer, decrypt=remote_session.cipher.decrypt, name='client <- server'),
+                )
+            except (ConnectionResetError, OSError):
+                pass
             self.logger.debug(f"TCP connection to {addr}:{port} is closed")
 
 
@@ -627,9 +630,9 @@ class Socks5_TCP_Retranslator(Socks5Client):
                     self.bytes_received += len(data)
 
                 if decrypt:
-                    data = decrypt(data, wrap=False)
+                    data = decrypt(data)
                 if encrypt:
-                    data = encrypt(data, wrap=False)
+                    data = encrypt(data)
 
                 writer.write(data)
                 if self.log_bytes:

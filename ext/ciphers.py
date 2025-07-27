@@ -303,22 +303,20 @@ class AESCipherCBC(Cipher):
 
     async def client_command(self, socks_version: int, user_command: int, target_host: str, target_port: int) -> bytes:
         addr_bytes = b''
+        atyp = 0x01
         length = 4
         try:
             ip = ipa.ip_address(target_host)
-            if ip.version == 4:  # IPv4
-                atyp = 0x01
-                addr_part = ip.packed
-            else:  # IPv6
+            addr_part = ip.packed
+            if ip.version == 6:  # IPv6
                 atyp = 0x04
-                addr_part = ip.packed
                 length = 16
         except ValueError:  # domain
             atyp = 0x03
             addr_bytes = target_host.encode("idna")
-            if len(addr_bytes) > 255:
-                raise ValueError("Domain name too long for SOCKS5")
             length = len(addr_bytes)
+            if length > 255:
+                raise ValueError("Domain name too long for SOCKS5")
 
         first_block = self.encrypt(
             struct.pack("!BBBBB", socks_version, user_command, 0x00, atyp, length)
@@ -354,7 +352,7 @@ class AESCipherCBC(Cipher):
                 port = int.from_bytes(data[length:], 'big')
 
             case 0x04:  # IPv6
-                data = self.decrypt(await reader.readexactly(16 + 2))
+                data = self.decrypt(await reader.readexactly(2*16))
                 addr = socket.inet_ntop(socket.AF_INET6, data[:16])
                 port = int.from_bytes(data[16:], 'big')
 
@@ -365,43 +363,38 @@ class AESCipherCBC(Cipher):
 
     async def server_make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> bytes:
         address_type = 0x01
-        head = "!BBBB"  # до address_type
         addr_data = socket.inet_aton("0.0.0.0")
-        tail = "!4sH"  # addr_data + port
+        length = 4
 
         try:
             ip = ipa.ip_address(address)
-
-            if ip.version == 4:
-                addr_data = ip.packed
-
-            elif ip.version == 6:
+            addr_data = ip.packed
+            if ip.version == 6:
                 address_type = 0x04
-                addr_data = ip.packed
-                tail = "!16sH"
+                length = 16
 
         except ValueError:
+            address_type = 0x03
             addr_bytes = address.encode('idna')
-            if len(addr_bytes) > 255:
+            length = len(addr_bytes)
+            if length > 255:
                 raise ValueError("Domain name too long for SOCKS5 protocol")
 
-            address_type = 0x03
-            addr_data = bytes([len(addr_bytes)]) + addr_bytes
-            tail = f"!{len(addr_data)}sH"
+            addr_data = bytes([length]) + addr_bytes
 
         except:
             address_type = 0x01
             port = 0
 
         first_header = struct.pack(
-            head,
+            "!BBBB",
             socks_version,
             reply_code,
             0x00,  # RSV
             address_type
         )
         second_header = struct.pack(
-            tail,
+            f"!{length}sH",
             addr_data,
             port
         )
@@ -436,8 +429,8 @@ class AESCipherCBC(Cipher):
                 address = addr_bytes.decode('idna')
 
             case 0x04:  # IPv6
-                addr_port = self.decrypt(await reader.readexactly(math.ceil(32 / AES.block_size)))
-                addr_bytes, port_bytes = addr_port[:16], addr_port[16:18]
+                addr_port = self.decrypt(await reader.readexactly(math.ceil(2*16)))
+                addr_bytes, port_bytes = addr_port[:16], addr_port[16:]
                 address = socket.inet_ntop(socket.AF_INET6, addr_bytes)
 
             case _:
@@ -463,31 +456,34 @@ class AESCipherCBC(Cipher):
 
 
 class ChaCha20_Poly1305(Cipher):
-    def __init__(self, key: bytes, nonce: Optional[bytes] = None, nonce_length: int = 12):
+    def __init__(self, key: bytes, nonce: Optional[bytes] = None, nonce_length: int = 8):
         super().__init__(key, nonce=nonce)
         self.key = key
         self.nonce_length = nonce_length
-        self.nonce = nonce
+        self.base_nonce = nonce
         self.cipher = ChaCha20Poly1305(key)
         self.nonce_counter = 0
 
+        self.MAC_LENGTH = 16
+
     async def client_send_methods(self, socks_version: int, methods: List[int]) -> bytes:
-        if self.nonce is None:
+        if self.base_nonce is None:
             raise ValueError("Nonce must be initialized before sending methods")
 
         header = struct.pack("!BB", socks_version, len(methods))
 
         methods_bytes = struct.pack(f"!{len(methods)}B", *methods)
-        return self.nonce + self.encrypt(header + methods_bytes)
+        return self.base_nonce + header + self.encrypt(methods_bytes)
 
     async def server_get_methods(self, socks_version: int, reader: asyncio.StreamReader) -> Dict[str, bool]:
-        self.nonce = await reader.readexactly(self.nonce_length)
-        version, nmethods = struct.unpack("!BB", self.decrypt(await reader.readexactly(2 + 16)))
+        self.base_nonce = await reader.readexactly(self.nonce_length)
+        self.nonce_counter = 0
+        version, nmethods = struct.unpack("!BB", await reader.readexactly(2))
 
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
 
-        encrypted_methods = await reader.readexactly(nmethods)
+        encrypted_methods = await reader.readexactly(nmethods+self.MAC_LENGTH)
         methods = self.decrypt(encrypted_methods)
 
         return {
@@ -499,7 +495,7 @@ class ChaCha20_Poly1305(Cipher):
         return self.encrypt(struct.pack("!BB", socks_version, method))
 
     async def client_get_method(self, socks_version: int, reader: asyncio.StreamReader) -> int:
-        enc = await reader.readexactly(2 + 16)
+        enc = await reader.readexactly(2 + self.MAC_LENGTH)
         version, method = struct.unpack("!BB", self.decrypt(enc))
 
         if version != socks_version:
@@ -509,15 +505,189 @@ class ChaCha20_Poly1305(Cipher):
 
         return method
 
+    async def server_auth_userpass(self, logins: Dict[str, str], reader: asyncio.StreamReader,
+                                   writer: asyncio.StreamWriter) -> Optional[Tuple[str, str]]:
+        encrypted_header = await reader.readexactly(2 + self.MAC_LENGTH)
+        auth_version, ulen = struct.unpack("!BB", self.decrypt(encrypted_header))
+
+        username = await reader.readexactly(ulen + self.MAC_LENGTH)
+        username = self.decrypt(username).decode()
+
+        plen_encrypted = await reader.readexactly(1 + self.MAC_LENGTH)
+        plen = self.decrypt(plen_encrypted)[0]
+
+        password = await reader.readexactly(plen + self.MAC_LENGTH)
+        password = self.decrypt(password).decode()
+
+        if logins.get(username) == password:
+            writer.write(self.encrypt(struct.pack("!BB", 1, 0)))
+            await writer.drain()
+            return username, password
+        else:
+            writer.write(self.encrypt(struct.pack("!BB", 1, 1)))
+            await writer.drain()
+
+    async def client_auth_userpass(self, username: str, password: str, reader: asyncio.StreamReader,
+                                   writer: asyncio.StreamWriter) -> bool:
+        username_bytes = username.encode()
+        password_bytes = password.encode()
+
+        writer.write(self.encrypt(struct.pack("!BB", 1, len(username_bytes))))
+        writer.write(self.encrypt(username_bytes))
+        writer.write(self.encrypt(bytes([len(password_bytes)])))
+        writer.write(self.encrypt(password_bytes))
+        await writer.drain()
+
+        response = await reader.readexactly(2 + self.MAC_LENGTH)
+        version, status = struct.unpack("!BB", self.decrypt(response))
+
+        if status != 0:
+            raise ConnectionError("Authentication failed")
+
+        return True
+
+    async def client_command(self, socks_version: int, user_command: int, target_host: str, target_port: int) -> bytes:
+        length = 4
+        try:
+            ip = ipa.ip_address(target_host)
+            if ip.version == 4: # IPv4
+                atyp = 0x01
+                addr_part = ip.packed
+            else: # IPv6
+                atyp = 0x04
+                length = 16
+                addr_part = ip.packed
+        except ValueError: # domain
+            atyp = 0x03
+            addr_part = target_host.encode("idna")
+            length = len(addr_part)
+            if length > 255:
+                raise ValueError("Domain name too long for SOCKS5")
+
+        first_block = self.encrypt(struct.pack("!BBBBB", socks_version, user_command, 0x00, atyp, length+2))
+        second_block = self.encrypt(addr_part + struct.pack("!H", target_port))
+        return first_block + second_block
+
+    async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
+                                    reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:
+
+        first_block = await reader.readexactly(5 + self.MAC_LENGTH)
+        version, cmd, rsv, address_type, address_length = self.decrypt(first_block)
+        if version != socks_version:
+            raise ConnectionError(f"Unsupported SOCKS version: {version}")
+
+        if not cmd in user_command_handlers.keys():
+            raise ConnectionError(f"Unsupported command: {cmd}, it must be one of {list(user_command_handlers.keys())}")
+        cmd = user_command_handlers[cmd]
+
+
+        data = self.decrypt(await reader.readexactly(address_length + self.MAC_LENGTH))
+        match address_type:
+            case 0x01:  # IPv4
+                addr = '.'.join(map(str, data[:4]))
+                port = int.from_bytes(data[4:], 'big')
+            case 0x03:  # domain
+                addr = data[:-2].decode()
+                port = int.from_bytes(data[-2:], 'big')
+            case 0x04:  # IPv6
+                addr = socket.inet_ntop(socket.AF_INET6, data[:16])
+                port = int.from_bytes(data[16:], 'big')
+            case _:
+                raise ConnectionError(f"Invalid address: {address_type}, it must be 0x01/0x03/0x04")
+
+        return addr, port, cmd
+
+    async def server_make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> bytes:
+        address_type = 0x01
+        addr_data = socket.inet_aton("0.0.0.0")
+        length = 4
+
+        try:
+            ip = ipa.ip_address(address)
+
+            if ip.version == 4:
+                addr_data = ip.packed
+
+            elif ip.version == 6:
+                address_type = 0x04
+                addr_data = ip.packed
+                length = 16
+
+        except addr_data:
+            addr_bytes = address.encode('idna')
+            length = len(addr_bytes)
+            if length > 255:
+                raise ValueError("Domain name too long for SOCKS5 protocol")
+            address_type = 0x03
+
+        except:
+            address_type = 0x01
+            port = 0
+
+        first_block = self.encrypt(struct.pack(
+            "!BBBBB",
+            socks_version,
+            reply_code,
+            0x00,  # RSV
+            address_type,
+            length+2,
+        ))
+        second_block = self.encrypt(struct.pack(
+            f"!{length}sH",
+            addr_data,
+            port
+        ))
+        return first_block + second_block
+
+    async def client_connect_confirm(self, reader: asyncio.StreamReader) -> Tuple[str, str]:
+        header_encrypted = await reader.readexactly(5 + self.MAC_LENGTH)
+        header = self.decrypt(header_encrypted)
+
+        try:
+            ver, rep, _, address_type, address_length = header
+            if ver != 0x05:
+                raise ConnectionError(f"Invalid SOCKS version in reply: {ver}")
+            if rep != 0x00:
+                raise ConnectionError(f"SOCKS5 CONNECT failed with code {rep}")
+
+        except Exception:
+            raise ConnectionError(f"Invalid header received: {header}")
+
+        enc = await reader.readexactly(address_length + self.MAC_LENGTH)
+        data = self.decrypt(enc)
+        match address_type:
+            case 0x01:  # IPv4
+                addr = '.'.join(map(str, data[:4]))
+                port = int.from_bytes(data[4:], 'big')
+            case 0x03:  # domain
+                addr = data[:-2].decode()
+                port = int.from_bytes(data[-2:], 'big')
+            case 0x04:  # IPv6
+                addr = socket.inet_ntop(socket.AF_INET6, data[:16])
+                port = int.from_bytes(data[16:], 'big')
+            case _:
+                raise ConnectionError(f"Invalid address: {address_type}, it must be 0x01/0x03/0x04")
+
+        return addr, port
+
+    @property
+    def nonce(self) -> bytes:
+        if self.nonce_counter > 0xFFFFFFFF:
+            self.nonce_counter = 0
+        else:
+            self.nonce_counter += 1
+
+        return self.base_nonce + self.nonce_counter.to_bytes(4, "big")
 
 
     def encrypt(self, data: bytes) -> bytes:
-        if self.nonce is None:
+        if self.base_nonce is None:
             raise ValueError("Nonce must be set before encryption")
-        return self.cipher.encrypt(self.nonce, data, None)
+        n = self.nonce
+        return self.cipher.encrypt(n, data, None)
 
     def decrypt(self, data: bytes) -> bytes:
-        if self.nonce is None:
+        if self.base_nonce is None:
             raise ValueError("Nonce must be set before decryption")
-        print(self.nonce, data, None)
-        return self.cipher.decrypt(self.nonce, data, None)
+        n = self.nonce
+        return self.cipher.decrypt(n, data, None)
