@@ -456,35 +456,31 @@ class AESCipherCBC(Cipher):
 
 
 class ChaCha20_Poly1305(Cipher):
-    def __init__(self, key: bytes, nonce: Optional[bytes] = None, nonce_length: int = 8):
-        super().__init__(key, nonce=nonce)
+    def __init__(self, key: bytes, nonce_length: int = 12):
+        super().__init__(key, nonce_length=nonce_length)
         self.key = key
         self.nonce_length = nonce_length
-        self.base_nonce = nonce
         self.cipher = ChaCha20Poly1305(key)
         self.nonce_counter = 0
+        self.base_nonce = os.urandom(self.nonce_length-4)
 
         self.MAC_LENGTH = 16
+        self._decoder_buffer = b''
 
     async def client_send_methods(self, socks_version: int, methods: List[int]) -> bytes:
-        if self.base_nonce is None:
-            raise ValueError("Nonce must be initialized before sending methods")
-
-        header = struct.pack("!BB", socks_version, len(methods))
-
-        methods_bytes = struct.pack(f"!{len(methods)}B", *methods)
-        return self.base_nonce + header + self.encrypt(methods_bytes)
+        first_block = self.encrypt(struct.pack("!BB", socks_version, len(methods)))
+        second_block = self.encrypt(struct.pack(f"!{len(methods)}B", *methods))
+        return first_block + second_block
 
     async def server_get_methods(self, socks_version: int, reader: asyncio.StreamReader) -> Dict[str, bool]:
-        self.base_nonce = await reader.readexactly(self.nonce_length)
-        self.nonce_counter = 0
-        version, nmethods = struct.unpack("!BB", await reader.readexactly(2))
+        header = await reader.readexactly(2 + 2 + self.nonce_length + self.MAC_LENGTH)
+        version, nmethods = struct.unpack("!BB", self.decrypt(header))
 
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
 
-        encrypted_methods = await reader.readexactly(nmethods+self.MAC_LENGTH)
-        methods = self.decrypt(encrypted_methods)
+        methods_enc = await reader.readexactly(2 + nmethods + self.nonce_length + self.MAC_LENGTH)
+        methods = struct.unpack(f"!{nmethods}B", self.decrypt(methods_enc))
 
         return {
             'supports_no_auth': 0x00 in methods,
@@ -495,7 +491,7 @@ class ChaCha20_Poly1305(Cipher):
         return self.encrypt(struct.pack("!BB", socks_version, method))
 
     async def client_get_method(self, socks_version: int, reader: asyncio.StreamReader) -> int:
-        enc = await reader.readexactly(2 + self.MAC_LENGTH)
+        enc = await reader.readexactly(2 + 2 + self.nonce_length + self.MAC_LENGTH)
         version, method = struct.unpack("!BB", self.decrypt(enc))
 
         if version != socks_version:
@@ -507,16 +503,16 @@ class ChaCha20_Poly1305(Cipher):
 
     async def server_auth_userpass(self, logins: Dict[str, str], reader: asyncio.StreamReader,
                                    writer: asyncio.StreamWriter) -> Optional[Tuple[str, str]]:
-        encrypted_header = await reader.readexactly(2 + self.MAC_LENGTH)
+        encrypted_header = await reader.readexactly(2 + 2 + self.nonce_length + self.MAC_LENGTH)
         auth_version, ulen = struct.unpack("!BB", self.decrypt(encrypted_header))
 
-        username = await reader.readexactly(ulen + self.MAC_LENGTH)
+        username = await reader.readexactly(2 + ulen + self.nonce_length + self.MAC_LENGTH)
         username = self.decrypt(username).decode()
 
-        plen_encrypted = await reader.readexactly(1 + self.MAC_LENGTH)
+        plen_encrypted = await reader.readexactly(2 + 1 + self.nonce_length + self.MAC_LENGTH)
         plen = self.decrypt(plen_encrypted)[0]
 
-        password = await reader.readexactly(plen + self.MAC_LENGTH)
+        password = await reader.readexactly(2 + plen + self.nonce_length + self.MAC_LENGTH)
         password = self.decrypt(password).decode()
 
         if logins.get(username) == password:
@@ -538,7 +534,7 @@ class ChaCha20_Poly1305(Cipher):
         writer.write(self.encrypt(password_bytes))
         await writer.drain()
 
-        response = await reader.readexactly(2 + self.MAC_LENGTH)
+        response = await reader.readexactly(2 + 2 + self.nonce_length + self.MAC_LENGTH)
         version, status = struct.unpack("!BB", self.decrypt(response))
 
         if status != 0:
@@ -571,7 +567,7 @@ class ChaCha20_Poly1305(Cipher):
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
                                     reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:
 
-        first_block = await reader.readexactly(5 + self.MAC_LENGTH)
+        first_block = await reader.readexactly(2 + 5 + self.nonce_length + self.MAC_LENGTH)
         version, cmd, rsv, address_type, address_length = self.decrypt(first_block)
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
@@ -581,7 +577,7 @@ class ChaCha20_Poly1305(Cipher):
         cmd = user_command_handlers[cmd]
 
 
-        data = self.decrypt(await reader.readexactly(address_length + self.MAC_LENGTH))
+        data = self.decrypt(await reader.readexactly(2 + address_length + self.nonce_length + self.MAC_LENGTH))
         match address_type:
             case 0x01:  # IPv4
                 addr = '.'.join(map(str, data[:4]))
@@ -640,7 +636,7 @@ class ChaCha20_Poly1305(Cipher):
         return first_block + second_block
 
     async def client_connect_confirm(self, reader: asyncio.StreamReader) -> Tuple[str, str]:
-        header_encrypted = await reader.readexactly(5 + self.MAC_LENGTH)
+        header_encrypted = await reader.readexactly(2 + 5 + self.nonce_length + self.MAC_LENGTH)
         header = self.decrypt(header_encrypted)
 
         try:
@@ -653,7 +649,7 @@ class ChaCha20_Poly1305(Cipher):
         except Exception:
             raise ConnectionError(f"Invalid header received: {header}")
 
-        enc = await reader.readexactly(address_length + self.MAC_LENGTH)
+        enc = await reader.readexactly(2 + address_length + self.nonce_length + self.MAC_LENGTH)
         data = self.decrypt(enc)
         match address_type:
             case 0x01:  # IPv4
@@ -672,22 +668,44 @@ class ChaCha20_Poly1305(Cipher):
 
     @property
     def nonce(self) -> bytes:
-        if self.nonce_counter > 0xFFFFFFFF:
-            self.nonce_counter = 0
-        else:
+        if self.nonce_counter <= 0xFFFFFFFF:
             self.nonce_counter += 1
+        else:
+            self.nonce_counter = 0
+            self.base_nonce = os.urandom(self.nonce_length-4)
 
-        return self.base_nonce + self.nonce_counter.to_bytes(4, "big")
+        return self.base_nonce + self.nonce_counter.to_bytes(4, 'big')
 
 
     def encrypt(self, data: bytes) -> bytes:
-        if self.base_nonce is None:
-            raise ValueError("Nonce must be set before encryption")
-        n = self.nonce
-        return self.cipher.encrypt(n, data, None)
+        result = b''
+        chunk_size = 65535
+
+        for i in range(0, len(data), chunk_size):
+            chunk = data[i:i + chunk_size]
+            nonce = self.nonce
+            result += len(chunk).to_bytes(2, byteorder='big') + nonce + self.cipher.encrypt(nonce, chunk, None)
+
+        return result
 
     def decrypt(self, data: bytes) -> bytes:
-        if self.base_nonce is None:
-            raise ValueError("Nonce must be set before decryption")
-        n = self.nonce
-        return self.cipher.decrypt(n, data, None)
+        self._decoder_buffer += data
+        result = b''
+
+        while True:
+            if len(self._decoder_buffer) < 2:
+                break
+
+            length = int.from_bytes(self._decoder_buffer[:2], 'big')
+            expected_len = 2 + self.nonce_length + length + self.MAC_LENGTH
+
+            if len(self._decoder_buffer) < expected_len:
+                break
+
+            nonce = self._decoder_buffer[2:2 + self.nonce_length]
+            ciphertext = self._decoder_buffer[2 + self.nonce_length:expected_len]
+
+            result += self.cipher.decrypt(nonce, ciphertext, None)
+            self._decoder_buffer = self._decoder_buffer[expected_len:]
+
+        return result
