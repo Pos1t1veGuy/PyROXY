@@ -11,7 +11,7 @@ from Cryptodome.Util import Counter
 from Cryptodome.Util.Padding import pad, unpad
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
-from ..base_cipher import Cipher
+from ..base_cipher import Cipher, REPLYES
 
 
 class AESCipherCTR(Cipher):
@@ -57,6 +57,7 @@ class AESCipherCTR(Cipher):
 
         return {
             'supports_no_auth': 0x00 in methods,
+            'supports_gss_api': 0x01 in methods,
             'supports_user_pass': 0x02 in methods
         }
 
@@ -164,7 +165,7 @@ class AESCipherCTR(Cipher):
         if ver != 0x05:
             raise ConnectionError(f"Invalid SOCKS version in reply: {ver}")
         if rep != 0x00:
-            raise ConnectionError(f"SOCKS5 request failed, REP={rep}")
+            raise ConnectionError(f"SOCKS5 request failed {REPLYES[rep]}")
 
         match atyp:
             case 0x01:  # IPv4
@@ -245,6 +246,7 @@ class AESCipherCBC(Cipher):
 
         return {
             'supports_no_auth': 0x00 in methods,
+            'supports_gss_api': 0x01 in methods,
             'supports_user_pass': 0x02 in methods
         }
 
@@ -404,15 +406,11 @@ class AESCipherCBC(Cipher):
         header_encrypted = await reader.readexactly(AES.block_size)
         header = self.decrypt(header_encrypted)
 
-        try:
-            ver, rep, _, atyp = header
-            if ver != 0x05:
-                raise ConnectionError(f"Invalid SOCKS version in reply: {ver}")
-            if rep != 0x00:
-                raise ConnectionError(f"SOCKS5 CONNECT failed with code {rep}")
-
-        except Exception:
-            raise ConnectionError(f"Invalid header received: {header}")
+        ver, rep, _, atyp = header
+        if ver != 0x05:
+            raise ConnectionError(f"Invalid SOCKS version in reply: {ver}")
+        if rep != 0x00:
+            raise ConnectionError(f"SOCKS5 CONNECT failed {REPLYES[rep]}")
 
         match atyp:
             case 0x01:  # IPv4
@@ -466,6 +464,7 @@ class ChaCha20_Poly1305(Cipher):
 
         self.MAC_LENGTH = 16
         self._decoder_buffer = b''
+        self.overhead_length = 2 + self.nonce_length + self.MAC_LENGTH
 
     async def client_send_methods(self, socks_version: int, methods: List[int]) -> bytes:
         first_block = self.encrypt(struct.pack("!BB", socks_version, len(methods)))
@@ -473,13 +472,13 @@ class ChaCha20_Poly1305(Cipher):
         return first_block + second_block
 
     async def server_get_methods(self, socks_version: int, reader: asyncio.StreamReader) -> Dict[str, bool]:
-        header = await reader.readexactly(2 + 2 + self.nonce_length + self.MAC_LENGTH)
+        header = await reader.readexactly(2 + self.overhead_length)
         version, nmethods = struct.unpack("!BB", self.decrypt(header))
 
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
 
-        methods_enc = await reader.readexactly(2 + nmethods + self.nonce_length + self.MAC_LENGTH)
+        methods_enc = await reader.readexactly(nmethods + self.overhead_length)
         methods = struct.unpack(f"!{nmethods}B", self.decrypt(methods_enc))
 
         return {
@@ -491,7 +490,7 @@ class ChaCha20_Poly1305(Cipher):
         return self.encrypt(struct.pack("!BB", socks_version, method))
 
     async def client_get_method(self, socks_version: int, reader: asyncio.StreamReader) -> int:
-        enc = await reader.readexactly(2 + 2 + self.nonce_length + self.MAC_LENGTH)
+        enc = await reader.readexactly(2 + self.overhead_length)
         version, method = struct.unpack("!BB", self.decrypt(enc))
 
         if version != socks_version:
@@ -503,16 +502,16 @@ class ChaCha20_Poly1305(Cipher):
 
     async def server_auth_userpass(self, logins: Dict[str, str], reader: asyncio.StreamReader,
                                    writer: asyncio.StreamWriter) -> Optional[Tuple[str, str]]:
-        encrypted_header = await reader.readexactly(2 + 2 + self.nonce_length + self.MAC_LENGTH)
+        encrypted_header = await reader.readexactly(2 + self.overhead_length)
         auth_version, ulen = struct.unpack("!BB", self.decrypt(encrypted_header))
 
-        username = await reader.readexactly(2 + ulen + self.nonce_length + self.MAC_LENGTH)
+        username = await reader.readexactly(ulen + self.overhead_length)
         username = self.decrypt(username).decode()
 
-        plen_encrypted = await reader.readexactly(2 + 1 + self.nonce_length + self.MAC_LENGTH)
+        plen_encrypted = await reader.readexactly(1 + self.overhead_length)
         plen = self.decrypt(plen_encrypted)[0]
 
-        password = await reader.readexactly(2 + plen + self.nonce_length + self.MAC_LENGTH)
+        password = await reader.readexactly(plen + self.overhead_length)
         password = self.decrypt(password).decode()
 
         if logins.get(username) == password:
@@ -534,7 +533,7 @@ class ChaCha20_Poly1305(Cipher):
         writer.write(self.encrypt(password_bytes))
         await writer.drain()
 
-        response = await reader.readexactly(2 + 2 + self.nonce_length + self.MAC_LENGTH)
+        response = await reader.readexactly(2 + self.overhead_length)
         version, status = struct.unpack("!BB", self.decrypt(response))
 
         if status != 0:
@@ -567,7 +566,7 @@ class ChaCha20_Poly1305(Cipher):
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
                                     reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:
 
-        first_block = await reader.readexactly(2 + 5 + self.nonce_length + self.MAC_LENGTH)
+        first_block = await reader.readexactly(5 + self.overhead_length)
         version, cmd, rsv, address_type, address_length = self.decrypt(first_block)
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
@@ -577,7 +576,7 @@ class ChaCha20_Poly1305(Cipher):
         cmd = user_command_handlers[cmd]
 
 
-        data = self.decrypt(await reader.readexactly(2 + address_length + self.nonce_length + self.MAC_LENGTH))
+        data = self.decrypt(await reader.readexactly(address_length + self.overhead_length))
         match address_type:
             case 0x01:  # IPv4
                 addr = '.'.join(map(str, data[:4]))
@@ -636,20 +635,16 @@ class ChaCha20_Poly1305(Cipher):
         return first_block + second_block
 
     async def client_connect_confirm(self, reader: asyncio.StreamReader) -> Tuple[str, str]:
-        header_encrypted = await reader.readexactly(2 + 5 + self.nonce_length + self.MAC_LENGTH)
+        header_encrypted = await reader.readexactly(5 + self.overhead_length)
         header = self.decrypt(header_encrypted)
 
-        try:
-            ver, rep, _, address_type, address_length = header
-            if ver != 0x05:
-                raise ConnectionError(f"Invalid SOCKS version in reply: {ver}")
-            if rep != 0x00:
-                raise ConnectionError(f"SOCKS5 CONNECT failed with code {rep}")
+        ver, rep, _, address_type, address_length = header
+        if ver != 0x05:
+            raise ConnectionError(f"Invalid SOCKS version in reply: {ver}")
+        if rep != 0x00:
+            raise ConnectionError(f"SOCKS5 CONNECT failed {REPLYES[rep]}")
 
-        except Exception:
-            raise ConnectionError(f"Invalid header received: {header}")
-
-        enc = await reader.readexactly(2 + address_length + self.nonce_length + self.MAC_LENGTH)
+        enc = await reader.readexactly(address_length + self.overhead_length)
         data = self.decrypt(enc)
         match address_type:
             case 0x01:  # IPv4
@@ -696,7 +691,7 @@ class ChaCha20_Poly1305(Cipher):
             if len(self._decoder_buffer) < 2:
                 break
 
-            length = int.from_bytes(self._decoder_buffer[:2], 'big')
+            length = int.from_bytes(self._decoder_buffer[:2], byteorder='big')
             expected_len = 2 + self.nonce_length + length + self.MAC_LENGTH
 
             if len(self._decoder_buffer) < expected_len:

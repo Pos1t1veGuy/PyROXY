@@ -90,7 +90,7 @@ class Socks5Server:
         else:
             data = await cipher.server_send_method_to_user(self.socks_version, 0xFF)
             await self.send(user, data, log_bytes=False)
-            raise ConnectionError(f'Can not use authentication method {user}')
+            raise ConnectionError(f'Can not use authentication method {user} - {", ".join(methods.keys())}')
 
         user.handshaked = True
         self.logger.debug(f'{user} is handshaked')
@@ -134,8 +134,8 @@ class Socks5Server:
         finally:
             await user.disconnect()
 
-    async def pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, name: str = 'default',
-                   encrypt: Optional[callable] = None, decrypt: Optional[callable] = None):
+    async def pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, stop_event: asyncio.Event,
+                   name: str = 'default', encrypt: Optional[callable] = None, decrypt: Optional[callable] = None):
         try:
             while not reader.at_eof():
                 data = await reader.read(4096)
@@ -156,6 +156,7 @@ class Socks5Server:
         except Exception as e:
             self.logger.error(f"Proxying PIPE '{name}' error: {e}")
         finally:
+            stop_event.set()
             writer.close()
             await writer.wait_closed()
 
@@ -184,9 +185,12 @@ class Socks5Server:
     async def disconnect_user(self, user: 'User'):
         if user.connected:
             user.connected = False
+        try:
             user.writer.close()
             await user.writer.wait_closed()
-        await self.delete_user(user)
+            await self.delete_user(user)
+        except (ConnectionResetError, OSError):
+            pass
         self.logger.info(f'{user} is disconnected')
 
     async def async_close(self):
@@ -439,10 +443,11 @@ class ConnectionMethods:
             return 1
 
         server.logger.debug(f'{user} connected to {addr}:{port}')
+        stop_event = asyncio.Event()
         try:
             await asyncio.gather(
-                server.pipe(client_reader, remote_writer, decrypt=cipher.decrypt, name='client -> server'),
-                server.pipe(remote_reader, client_writer, encrypt=cipher.encrypt, name='client <- servers'),
+                server.pipe(client_reader, remote_writer, stop_event, decrypt=cipher.decrypt, name='client -> server'),
+                server.pipe(remote_reader, client_writer, stop_event, encrypt=cipher.encrypt, name='client <- servers'),
             )
         except (ConnectionResetError, OSError):
             pass

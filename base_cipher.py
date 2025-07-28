@@ -51,6 +51,20 @@ Each `Cipher` subclass must implement or override:
 '''
 
 
+REPLYES = {
+    0x00: "SUCCEEDED",
+    0x01: "GENERAL_FAILURE",
+    0x02: "CONNECTION_NOT_ALLOWED",
+    0x03: "NETWORK_UNREACHABLE",
+    0x04: "HOST_UNREACHABLE",
+    0x05: "CONNECTION_REFUSED",
+    0x06: "TTL_EXPIRED",
+    0x07: "COMMAND_NOT_SUPPORTED",
+    0x08: "ADDRESS_TYPE_NOT_SUPPORTED",
+    0xFF: "CONNECTION_NOT_ALLOWED",
+}
+
+
 class Cipher:
     def __init__(self, *args, **kwargs):
         self.logger = logging.getLogger(__name__)
@@ -88,7 +102,8 @@ class Cipher:
 
         return {
             'supports_no_auth': 0x00 in methods,
-            'supports_user_pass': 0x02 in methods
+            'supports_gss_api': 0x01 in methods,
+            'supports_user_pass': 0x02 in methods,
         }
 
     async def server_send_method_to_user(self, socks_version: int, method: int) -> bytes:
@@ -242,7 +257,7 @@ class Cipher:
         if ver != 0x05:
             raise ConnectionError(f"Invalid SOCKS version in reply: {ver}")
         if rep != 0x00:
-            raise ConnectionError(f"SOCKS5 request failed, REP={rep}")
+            raise ConnectionError(f"SOCKS5 request failed {REPLYES[rep]}")
 
         if atyp == 0x01:  # IPv4
             addr_bytes = await reader.readexactly(4)

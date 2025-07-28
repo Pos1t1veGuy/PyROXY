@@ -456,6 +456,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
         self.remote_port = remote_port
         self.username = username
         self.password = password
+        self.pipe = Socks5Server.pipe
 
         self._local_host = 'localhost'
         self._local_host = 0
@@ -507,14 +508,13 @@ class Socks5_TCP_Retranslator(Socks5Client):
         # Connecting to the remote proxy, sending command
         try:
             remote_session = await self.handshake(
-                proxy_host=self.remote_host, proxy_port=self.remote_port,username=self.username, password=self.password
+                proxy_host=self.remote_host, proxy_port=self.remote_port, username=self.username, password=self.password
             )
         except ConnectionRefusedError:
             self.logger.error(f"The server is not started {self.remote_host}:{self.remote_port}")
             client_writer.close()
             await client_writer.wait_closed()
             return
-
         except Exception as e:
             self.logger.error(f"Can not do handshake to remote proxy {self.remote_host}:{self.remote_port} — {e}")
             client_writer.close()
@@ -542,10 +542,13 @@ class Socks5_TCP_Retranslator(Socks5Client):
                 await client_writer.drain()
                 return
 
+            stop_event = asyncio.Event()
             try:
                 await asyncio.gather(
-                    self.pipe(client_reader, remote_session.writer, encrypt=remote_session.cipher.encrypt, name='client -> server'),
-                    self.pipe(remote_session.reader, client_writer, decrypt=remote_session.cipher.decrypt, name='client <- server'),
+                    self.pipe(self, client_reader, remote_session.writer, stop_event, encrypt=remote_session.cipher.encrypt,
+                              name='client -> server'),
+                    self.pipe(self, remote_session.reader, client_writer, stop_event, decrypt=remote_session.cipher.decrypt,
+                              name='client <- server'),
                 )
             except (ConnectionResetError, OSError):
                 pass
@@ -617,29 +620,3 @@ class Socks5_TCP_Retranslator(Socks5Client):
             )
             await remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False)
             address, port = await remote_session.cipher.client_connect_confirm(reader)
-
-
-    async def pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, name: str = 'default',
-                   encrypt: Optional[callable] = None, decrypt: Optional[callable] = None) -> int:
-        try:
-            while not reader.at_eof():
-                data = await reader.read(4096)
-                if not data:
-                    break
-                if self.log_bytes:
-                    self.bytes_received += len(data)
-
-                if decrypt:
-                    data = decrypt(data)
-                if encrypt:
-                    data = encrypt(data)
-
-                writer.write(data)
-                if self.log_bytes:
-                    self.bytes_sent += len(data)
-                await writer.drain()
-        except Exception as e:
-            self.logger.error(f"Proxying PIPE '{name}' error: {e}")
-        finally:
-            writer.close()
-            await writer.wait_closed()
