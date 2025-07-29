@@ -385,7 +385,7 @@ class ChaCha20_Poly1305_HTTPWS(ChaCha20_Poly1305):
     def decrypt(self, data: bytes, wrap: bool = True) -> List[bytes]:
         if wrap:
             data_list, self._decoder_buffer_frame = self._parse_ws_frames(data, self._decoder_buffer_frame)
-            return [b''.join([b''.join(super().decrypt(frame)) for frame in data_list])]#
+            return [b''.join([b''.join(super().decrypt(frame)) for frame in data_list])]
 
         return super().decrypt(data)
 
