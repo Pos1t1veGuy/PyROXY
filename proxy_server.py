@@ -149,9 +149,11 @@ class Socks5Server:
                 if encrypt:
                     data = encrypt(data)
 
-                writer.write(data)
-                if self.log_bytes:
-                    self.bytes_sent += len(data)
+                for frame in data:
+                    writer.write(frame)
+                    if self.log_bytes:
+                        self.bytes_sent += len(frame)
+
                 await writer.drain()
         except Exception as e:
             self.logger.error(f"Proxying PIPE '{name}' error: {e}")

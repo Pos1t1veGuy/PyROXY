@@ -282,9 +282,9 @@ class Cipher:
 
 
     @staticmethod
-    def encrypt(data: bytes) -> bytes:
-        return data
+    def encrypt(data: bytes) -> List[bytes]:
+        return [data]
 
     @staticmethod
-    def decrypt(data: bytes) -> bytes:
-        return data
+    def decrypt(data: bytes) -> List[bytes]:
+        return [data]

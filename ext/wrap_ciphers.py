@@ -387,20 +387,20 @@ class ChaCha20_Poly1305_HTTPWS(ChaCha20_Poly1305):
         return frames, data[i:]
 
 
-    def encrypt(self, data: bytes, wrap: bool = True, mask: bool = False) -> bytes:
+    def encrypt(self, data: bytes, wrap: bool = True, mask: bool = False) -> List[bytes]:
         data = super().encrypt(data)
 
         if wrap:
-            return self.wrapper.wrap(data, mask=self.is_client and mask)
+            return [self.wrapper.wrap(frame, mask=self.is_client and mask) for frame in data]
         elif mask:
-            return self.wrapper.mask(data, self.wrapper.rmask)
+            return [self.wrapper.mask(frame, self.wrapper.rmask) for frame in data]
         else:
             return data
 
-    def decrypt(self, data: bytes, wrap: bool = True) -> bytes:
+    def decrypt(self, data: bytes, wrap: bool = True) -> List[bytes]:
         if wrap:
             data_list, self._decoder_buffer_frame = self._parse_ws_frames(data, self._decoder_buffer_frame)
-            return b''.join([super().decrypt(frame) for frame in data_list])
+            return [b''.join(super().decrypt(frame)) for frame in data_list]
 
         return super().decrypt(data)
 

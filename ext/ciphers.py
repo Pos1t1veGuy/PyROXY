@@ -672,20 +672,20 @@ class ChaCha20_Poly1305(Cipher):
         return self.base_nonce + self.nonce_counter.to_bytes(4, 'big')
 
 
-    def encrypt(self, data: bytes) -> bytes:
-        result = b''
+    def encrypt(self, data: bytes) -> List[bytes]:
+        result = []
         chunk_size = 65535
 
         for i in range(0, len(data), chunk_size):
             chunk = data[i:i + chunk_size]
             nonce = self.nonce
-            result += len(chunk).to_bytes(2, byteorder='big') + nonce + self.cipher.encrypt(nonce, chunk, None)
+            result.append(len(chunk).to_bytes(2, byteorder='big') + nonce + self.cipher.encrypt(nonce, chunk, None))
 
         return result
 
-    def decrypt(self, data: bytes) -> bytes:
+    def decrypt(self, data: bytes) -> List[bytes]:
         self._decoder_buffer += data
-        result = b''
+        result = []
 
         while True:
             if len(self._decoder_buffer) < 2:
@@ -700,7 +700,7 @@ class ChaCha20_Poly1305(Cipher):
             nonce = self._decoder_buffer[2:2 + self.nonce_length]
             ciphertext = self._decoder_buffer[2 + self.nonce_length:expected_len]
 
-            result += self.cipher.decrypt(nonce, ciphertext, None)
+            result.append(self.cipher.decrypt(nonce, ciphertext, None))
             self._decoder_buffer = self._decoder_buffer[expected_len:]
 
         return result
