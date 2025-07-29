@@ -38,7 +38,7 @@ SERVER = Socks5Server(
     users=users['users'],
     accept_anonymous=users['accept_anonymous'],
     cipher=ChaCha20_Poly1305_HTTPWS(key=b'\x86P\x0e\xd3\xd4\xf2\xbc\x19\x1f\x98\xc5\xd0e\xf3X\x07\xf7\xd5R_\x9b\x1c\x92R\xe0}JY\x94\x01nF'),
-    udp_cipher=AESCipherCTR(key=hashlib.sha256(key).digest()),
+    udp_cipher=AES_CTR(key=hashlib.sha256(key).digest()),
     port=180
 )
 # SERVER.logger.addHandler(file_handler)

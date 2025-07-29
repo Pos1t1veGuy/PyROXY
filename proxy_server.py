@@ -309,7 +309,7 @@ class UDPServerProxy(asyncio.DatagramProtocol):
 
     def handle_client(self, data: bytes, addr: Tuple[str, int]):
         try:
-            data = self.cipher.decrypt(data)
+            data = b''.join(self.cipher.decrypt(data))
             if len(data) < 4:
                 self.logger.warning("UDP packet too short for SOCKS5 header.")
                 return

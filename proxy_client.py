@@ -339,7 +339,7 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
 
     def send(self, data: bytes):
         header_socks5 = self.format_socks5_udp_header(self.host, self.port)
-        self.raw_send(self.cipher.encrypt(header_socks5 + data))
+        self.raw_send(b''.join(self.cipher.encrypt(header_socks5 + data)))
         self.logger.debug(f"Sent {len(data)} bytes to UDP proxy {self.addr}")
 
     async def async_recv(self, timeout: int = 5) -> Tuple[bytes, Tuple[str, int]]:

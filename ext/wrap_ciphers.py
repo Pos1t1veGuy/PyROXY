@@ -4,11 +4,11 @@ import socket
 import struct
 
 from .wrappers import HTTP_WS_Wrapper
-from .ciphers import AESCipherCTR, ChaCha20_Poly1305
+from .ciphers import AES_CTR, ChaCha20_Poly1305
 from ..base_cipher import Cipher, REPLYES
 
 
-class AESCipherCTR_HTTPWS(AESCipherCTR):
+class AES_CTR_HTTPWS(AES_CTR):
     def __init__(self, *args, http_path: str = "/", ws_path: str = "/ws/", host: str = "example.com",  **kwargs):
         self.wrapper = HTTP_WS_Wrapper(host=host, http_path=http_path, ws_path=ws_path)
         self.server_hello = self.wrapper.server_hello

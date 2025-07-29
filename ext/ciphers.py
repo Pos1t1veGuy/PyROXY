@@ -16,7 +16,7 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from ..base_cipher import Cipher, REPLYES
 
 
-class AESCipherCTR(Cipher):
+class AES_CTR(Cipher):
     def __init__(self, key: bytes, iv: Optional[bytes] = None, iv_length: int = 16):
         super().__init__(key, iv=iv)
         self.key = key
@@ -203,7 +203,7 @@ class AESCipherCTR(Cipher):
             raise OSError(f'{self.__class__.__name__} needs to specify IV (init vector) in constructor or handshake')
 
 
-class AESCipherCBC(Cipher):
+class AES_CBC(Cipher):
     def __init__(self, key: bytes, iv: Optional[bytes] = None, iv_length: int = 16):
         super().__init__(key, iv=iv)
         self.key = key
