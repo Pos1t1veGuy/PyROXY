@@ -90,7 +90,8 @@ class Socks5Server:
         else:
             data = await cipher.server_send_method_to_user(self.socks_version, 0xFF)
             await self.send(user, data, log_bytes=False)
-            raise ConnectionError(f'Can not use authentication method {user} - {", ".join(methods.keys())}')
+            ms = ", ".join([m for m, enabled in methods.items() if enabled])
+            raise ConnectionError(f'Can not use authentication method {user} - {ms}')
 
         user.handshaked = True
         self.logger.debug(f'{user} is handshaked')
@@ -128,8 +129,8 @@ class Socks5Server:
             else:
                 self.logger.warning(f'Suspicious client connected: {user}')
 
-        except Exception as e:
-            self.logger.error(f"Connection error: {e}")
+        # except Exception as e:
+        #     self.logger.error(f"Connection error: {e}")
 
         finally:
             await user.disconnect()
@@ -155,17 +156,23 @@ class Socks5Server:
                         self.bytes_sent += len(frame)
 
                 await writer.drain()
-        except Exception as e:
-            self.logger.error(f"Proxying PIPE '{name}' error: {e}")
+        # except Exception as e:
+        #     self.logger.error(f"Proxying PIPE '{name}' error: {e}")
         finally:
             stop_event.set()
             writer.close()
             await writer.wait_closed()
 
-    async def send(self, user: 'User', data: bytes, log_bytes: bool = True):
-        user.writer.write(data)
-        if self.log_bytes and log_bytes:
-            self.bytes_sent += len(data)
+    async def send(self, user: 'User', data: Union[bytes, List[bytes]], log_bytes: bool = True):
+        if isinstance(data, list):
+            for frame in data:
+                user.writer.write(frame)
+                if self.log_bytes and log_bytes:
+                    self.bytes_sent += len(frame)
+        else:
+            user.writer.write(data)
+            if self.log_bytes and log_bytes:
+                self.bytes_sent += len(data)
         await user.writer.drain()
         self.logger.debug(f'Sent {len(data)} bytes to {user}')
 
@@ -436,11 +443,13 @@ class ConnectionMethods:
         try:
             remote_reader, remote_writer = await asyncio.open_connection(addr, port)
             local_ip, local_port = remote_writer.get_extra_info("sockname")
-            client_writer.write(await cipher.server_make_reply(server.socks_version, 0x00, local_ip, local_port))
+            reply_frames = await cipher.server_make_reply(server.socks_version, 0x00, local_ip, local_port)
+            client_writer.write(b''.join(reply_frames))
             await client_writer.drain()
         except Exception as e:
             server.logger.warning(f"Failed to connect to {addr}:{port} => {e}")
-            client_writer.write(await cipher.server_make_reply(server.socks_version, 0xFF, '0.0.0.0', 0))
+            reply_frames = await cipher.server_make_reply(server.socks_version, 0xFF, '0.0.0.0', 0)
+            client_writer.write(b''.join(reply_frames))
             await client_writer.drain()
             return 1
 
@@ -475,7 +484,7 @@ class ConnectionMethods:
             )
         except Exception as e:
             server.logger.error(f"Failed to start UDP relay: {e}")
-            reply = await cipher.server_make_reply(server.socks_version, 0x01, '0.0.0.0', 0)
+            reply = b''.join(await cipher.server_make_reply(server.socks_version, 0x01, '0.0.0.0', 0))
             client_writer.write(reply)
             await client_writer.drain()
             return 1
@@ -485,12 +494,13 @@ class ConnectionMethods:
         server.logger.info(f"Started UDP server for {addr}:{port} at {udp_host}:{udp_port}")
 
         try:
-            reply = await cipher.server_make_reply(server.socks_version, 0x00, udp_host, udp_port)
+            reply = b''.join(await cipher.server_make_reply(server.socks_version, 0x00, udp_host, udp_port))
             client_writer.write(reply)
             await client_writer.drain()
         except Exception as e:
             self.logger.warning(f"Failed to make UDP connection at TCP {addr}:{port}; UDP {udp_host}:{udp_port} => {e}")
-            client_writer.write(await default_cipher.server_make_reply(self.socks_version, 0xFF, '0.0.0.0', 0))
+            reply = b''.join(await default_cipher.server_make_reply(self.socks_version, 0xFF, '0.0.0.0', 0))
+            client_writer.write(reply)
             await client_writer.drain()
             return
 

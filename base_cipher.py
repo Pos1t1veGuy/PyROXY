@@ -84,13 +84,13 @@ class Cipher:
         self.logger.debug(f'{self.__class__.__name__} server_hello')
         return True
 
-    async def client_send_methods(self, socks_version: int, methods: List[int]) -> bytes:
+    async def client_send_methods(self, socks_version: int, methods: List[int]) -> List[bytes]:
         self.logger.debug(f'{self.__class__.__name__} The client sent an auth methods {methods}')
-        return bytes([
+        return [bytes([
             socks_version,
             len(methods),
             *methods,
-        ])
+        ])]
 
     async def server_get_methods(self, socks_version: int, reader: asyncio.StreamReader) -> Dict[str, bool]:
         self.logger.debug(f'{self.__class__.__name__} The server received an auth client methods')
@@ -106,9 +106,9 @@ class Cipher:
             'supports_user_pass': 0x02 in methods,
         }
 
-    async def server_send_method_to_user(self, socks_version: int, method: int) -> bytes:
+    async def server_send_method_to_user(self, socks_version: int, method: int) -> List[bytes]:
         self.logger.debug(f'{self.__class__.__name__} The server sent an auth method {method}')
-        return bytes([socks_version, method])
+        return [bytes([socks_version, method])]
 
     async def client_get_method(self, socks_version: int, reader: asyncio.StreamReader) -> int:
         self.logger.debug(f'{self.__class__.__name__} The client received selected an auth method')
@@ -208,46 +208,43 @@ class Cipher:
         port = int.from_bytes(port_bytes, byteorder='big')
         return addr, port, cmd
 
-    async def server_make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> bytes:
+    async def server_make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> List[bytes]:
         self.logger.debug(f'{self.__class__.__name__} The server makes a reply {reply_code}')
         address_type = 0x01
-        head = "!BBBB"
+        length = 4
         addr_data = socket.inet_aton("0.0.0.0")
-        tail = "4sH"
 
         try:
             ip = ipa.ip_address(address)
-
-            if ip.version == 4:
-                addr_data = ip.packed
-
-            elif ip.version == 6:
+            addr_data = ip.packed
+            if ip.version == 6:
                 address_type = 0x04
                 addr_data = ip.packed
-                tail = "16sH"
+                length = 16
 
         except ValueError:
+            address_type = 0x03
             addr_bytes = address.encode('idna')
-            if len(addr_bytes) > 255:
+            length = len(addr_bytes)
+            if length > 255:
                 raise ValueError("Domain name too long for SOCKS5 protocol")
 
-            address_type = 0x03
-            addr_data = bytes([len(addr_bytes)]) + addr_bytes
-            tail = f"{1 + len(addr_bytes)}sH"
+            addr_data = bytes([length]) + addr_bytes
+            length += 1
 
         except:
             address_type = 0x01
             port = 0
 
-        return struct.pack(
-            head + tail,
+        return [struct.pack(
+            f"!BBBB{length}sH",
             socks_version,
             reply_code,
             0x00,  # RSV
             address_type,
             addr_data,
             port
-        )
+        )]
 
     async def client_connect_confirm(self, reader: asyncio.StreamReader) -> Tuple[str, str]:
         self.logger.debug(f'{self.__class__.__name__} The client confirms connection')
