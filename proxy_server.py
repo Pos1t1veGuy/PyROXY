@@ -71,6 +71,7 @@ class Socks5Server:
             client_ip, client_port = writer.get_extra_info("peername")
             user = await self.add_user(client_ip, client_port, writer)
 
+        self.logger.debug('The server getting an auth methods')
         methods = await cipher.server_get_methods(self.socks_version, reader)
 
         if methods['supports_no_auth'] and self.accept_anonymous:
@@ -82,6 +83,7 @@ class Socks5Server:
             data = await cipher.server_send_method_to_user(self.socks_version, 0x02)
             await self.send(user, data, log_bytes=False)
 
+            self.logger.debug('The server is authorizing the client')
             auth_data = await cipher.server_auth_userpass(self.users_auth_data, reader, writer)
             if not auth_data:
                 raise ConnectionError(f"Wrong authentication data {user}")

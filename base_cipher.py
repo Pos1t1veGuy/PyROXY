@@ -67,7 +67,6 @@ REPLYES = {
 
 class Cipher:
     def __init__(self, *args, **kwargs):
-        self.logger = logging.getLogger(__name__)
         self.is_client = False
         self.is_server = False
         self._init_args = args
@@ -77,15 +76,12 @@ class Cipher:
         return self.__class__(*self._init_args, **self._init_kwargs)
 
     async def client_hello(self, client: 'Socks5Client', reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
-        self.logger.debug(f'{self.__class__.__name__} client_hello')
         return True
 
     async def server_hello(self, server: 'Socks5Server', reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
-        self.logger.debug(f'{self.__class__.__name__} server_hello')
         return True
 
     async def client_send_methods(self, socks_version: int, methods: List[int]) -> List[bytes]:
-        self.logger.debug(f'{self.__class__.__name__} The client sent an auth methods {methods}')
         return [bytes([
             socks_version,
             len(methods),
@@ -93,7 +89,6 @@ class Cipher:
         ])]
 
     async def server_get_methods(self, socks_version: int, reader: asyncio.StreamReader) -> Dict[str, bool]:
-        self.logger.debug(f'{self.__class__.__name__} The server received an auth client methods')
         version, nmethods = await reader.readexactly(2)
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
@@ -107,11 +102,9 @@ class Cipher:
         }
 
     async def server_send_method_to_user(self, socks_version: int, method: int) -> List[bytes]:
-        self.logger.debug(f'{self.__class__.__name__} The server sent an auth method {method}')
         return [bytes([socks_version, method])]
 
     async def client_get_method(self, socks_version: int, reader: asyncio.StreamReader) -> int:
-        self.logger.debug(f'{self.__class__.__name__} The client received selected an auth method')
         response = await reader.readexactly(2)
 
         if response[0] != socks_version:
@@ -123,7 +116,6 @@ class Cipher:
 
     async def server_auth_userpass(self, logins: Dict[str, str], reader: asyncio.StreamReader,
                             writer: asyncio.StreamWriter) -> Optional[Tuple[str, str]]:
-        self.logger.debug(f'{self.__class__.__name__} The server authorizes the client')
         auth_version = (await reader.readexactly(1))[0]
 
         if auth_version == 1:
@@ -143,7 +135,6 @@ class Cipher:
 
     async def client_auth_userpass(self, username: str, password: str, reader: asyncio.StreamReader,
                                    writer: asyncio.StreamWriter) -> bool:
-        self.logger.debug(f'{self.__class__.__name__} The client logs in to the server')
         username_bytes = username.encode()
         password_bytes = password.encode()
 
@@ -158,7 +149,6 @@ class Cipher:
             raise ConnectionError(f'Invalid answer received {resp}')
 
     async def client_command(self, socks_version: int, user_command: int, target_host: str, target_port: int) -> bytes:
-        self.logger.debug(f'{self.__class__.__name__} The client sent command {user_command} to the server')
         try:
             ip = ipa.ip_address(target_host)
             if ip.version == 4: # IPv4
@@ -181,7 +171,6 @@ class Cipher:
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
                              reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:
 
-        self.logger.debug(f'{self.__class__.__name__} The server received a command')
         version, cmd, rsv, address_type = await reader.readexactly(4)
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
@@ -209,7 +198,6 @@ class Cipher:
         return addr, port, cmd
 
     async def server_make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> List[bytes]:
-        self.logger.debug(f'{self.__class__.__name__} The server makes a reply {reply_code}')
         address_type = 0x01
         length = 4
         addr_data = socket.inet_aton("0.0.0.0")
@@ -247,7 +235,6 @@ class Cipher:
         )]
 
     async def client_connect_confirm(self, reader: asyncio.StreamReader) -> Tuple[str, str]:
-        self.logger.debug(f'{self.__class__.__name__} The client confirms connection')
         hdr = await reader.readexactly(4)
         ver, rep, rsv, atyp = hdr
 

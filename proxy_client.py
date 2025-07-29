@@ -48,10 +48,11 @@ class Socks5Client:
         if username and password:
             methods.insert(0, 0x02)
 
+        self.logger.debug("Sent auth methods")
         methods_msg = await session.cipher.client_send_methods(self.socks_version, methods)
         await session.asend(methods_msg, encrypt=False, log_bytes=False)
+        self.logger.debug("Receiving server auth method")
         method_chosen = await session.cipher.client_get_method(self.socks_version, reader)
-        self.logger.debug("Sent client_hello")
 
         try:
             if method_chosen == 0xFF:
@@ -61,6 +62,7 @@ class Socks5Client:
                 if not username or not password:
                     raise ConnectionError("Proxy requires username/password authentication, but none provided")
 
+                self.logger.debug("Client is authorizing")
                 auth_ok = await session.cipher.client_auth_userpass(username, password, reader, writer)
                 if not auth_ok:
                     raise ConnectionError("Authentication failed")
