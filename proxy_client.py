@@ -172,16 +172,22 @@ class TCP_ProxySession:
         self._pt_buffer = bytearray()
 
 
-    async def asend(self, data: bytes, encrypt: bool = True, log_bytes: bool = True, wait: bool = True):
-        data = self.cipher.encrypt(data) if encrypt else data
-        if self.log_bytes and log_bytes:
-            self.bytes_sent += len(data)
-        self.writer.write(data)
+    async def asend(self, data: Union[bytes, List[bytes]], encrypt: bool = True, log_bytes: bool = True, wait: bool = True):
+        if encrypt:
+            data = self.cipher.encrypt(data)
+
+        if isinstance(data, list):
+            for frame in data:
+                if self.log_bytes and log_bytes:
+                    self.bytes_sent += len(frame)
+                self.writer.write(frame)
+        else:
+            self.writer.write(data)
         if wait:
             await self.writer.drain()
         self.logger.debug(f"Sent {len(data)} bytes to TCP proxy {self.addr}")
 
-    def send(self, data: bytes, encrypt: bool = True, log_bytes: bool = True, wait: bool = True):
+    def send(self, data: Union[bytes, List[bytes]], encrypt: bool = True, log_bytes: bool = True, wait: bool = True):
         return asyncio.run(self.asend(data, encrypt=encrypt, log_bytes=log_bytes, wait=wait))
 
 
@@ -196,7 +202,7 @@ class TCP_ProxySession:
             data = await self.reader.read(-1)
             if self.log_bytes and log_bytes:
                 self.bytes_received += len(data)
-            data = self._pt_buffer + (self.cipher.decrypt(data, **kwargs) if decrypt and data else data)
+            data = self._pt_buffer + (b''.join(self.cipher.decrypt(data, **kwargs)) if decrypt and data else data)
             self._pt_buffer = bytearray()
         elif num_bytes == buffer_length:
             data = self._pt_buffer
@@ -205,7 +211,7 @@ class TCP_ProxySession:
             data = await self.reader.read(num_bytes - buffer_length)
             if self.log_bytes and log_bytes:
                 self.bytes_received += len(data)
-            data = self._pt_buffer + (self.cipher.decrypt(data, **kwargs) if decrypt and data else data)
+            data = self._pt_buffer + (b''.join(self.cipher.decrypt(data, **kwargs)) if decrypt and data else data)
             self._pt_buffer = bytearray()
         else:
             data = self._pt_buffer[:num_bytes]
@@ -226,7 +232,7 @@ class TCP_ProxySession:
             data = await self.reader.readexactly(num_bytes - buffer_length)
             if self.log_bytes and log_bytes:
                 self.bytes_received += len(data)
-            data = self._pt_buffer + (self.cipher.decrypt(data, **kwargs) if decrypt else data)
+            data = self._pt_buffer + (b''.join(self.cipher.decrypt(data, **kwargs)) if decrypt else data)
             self._pt_buffer = bytearray()
         else:
             data = self._pt_buffer[:num_bytes]
@@ -269,7 +275,7 @@ class TCP_ProxySession:
             if self.log_bytes and log_bytes:
                 self.bytes_received += len(chunk)
 
-            self._pt_buffer += self.cipher.decrypt(chunk, **kwargs)
+            self._pt_buffer += b''.join(self.cipher.decrypt(chunk, **kwargs))
 
             pos = self._pt_buffer.find(sep)
             if pos != -1:
@@ -490,15 +496,15 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
         # Connecting to the local proxy, getting a command
         self.logger.debug('Local client connecting...')
-        try:
-            user = await self.local_server.handshake(client_reader, client_writer, default_cipher)
-        except Exception as e:
-            self.logger.error(
-                f"Can not do handshake to local proxy {self.local_server.host}:{self.local_server.port} — {e}"
-            )
-            client_writer.close()
-            await client_writer.wait_closed()
-            return
+        # try:
+        user = await self.local_server.handshake(client_reader, client_writer, default_cipher)
+        # except Exception as e:
+        #     self.logger.error(
+        #         f"Can not do handshake to local proxy {self.local_server.host}:{self.local_server.port} — {e}"
+        #     )
+        #     client_writer.close()
+        #     await client_writer.wait_closed()
+        #     return
         self.logger.info(f'Local client connected {user}')
         addr, port, command = await default_cipher.server_handle_command(
             self.socks_version, self.local_server.user_commands, client_reader
@@ -506,20 +512,20 @@ class Socks5_TCP_Retranslator(Socks5Client):
         self.logger.info(f'Local client {user} sent command {command.__qualname__}')
 
         # Connecting to the remote proxy, sending command
-        try:
-            remote_session = await self.handshake(
-                proxy_host=self.remote_host, proxy_port=self.remote_port, username=self.username, password=self.password
-            )
-        except ConnectionRefusedError:
-            self.logger.error(f"The server is not started {self.remote_host}:{self.remote_port}")
-            client_writer.close()
-            await client_writer.wait_closed()
-            return
-        except Exception as e:
-            self.logger.error(f"Can not do handshake to remote proxy {self.remote_host}:{self.remote_port} — {e}")
-            client_writer.close()
-            await client_writer.wait_closed()
-            return
+        # try:
+        remote_session = await self.handshake(
+            proxy_host=self.remote_host, proxy_port=self.remote_port, username=self.username, password=self.password
+        )
+        # except ConnectionRefusedError:
+        #     self.logger.error(f"The server is not started {self.remote_host}:{self.remote_port}")
+        #     client_writer.close()
+        #     await client_writer.wait_closed()
+        #     return
+        # except Exception as e:
+        #     self.logger.error(f"Can not do handshake to remote proxy {self.remote_host}:{self.remote_port} — {e}")
+        #     client_writer.close()
+        #     await client_writer.wait_closed()
+        #     return
         self.logger.debug(f'Client {user} handshaked with remote server')
 
 
@@ -534,11 +540,13 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
             try:
                 local_ip, local_port = remote_session.writer.get_extra_info("sockname")
-                client_writer.write(await default_cipher.server_make_reply(self.socks_version, 0x00, local_ip, local_port))
+                reply_frames = await default_cipher.server_make_reply(self.socks_version, 0x00, local_ip, local_port)
+                client_writer.write(b''.join(reply_frames))
                 await client_writer.drain()
             except Exception as e:
                 self.logger.warning(f"Failed to connect to {addr}:{port} => {e}")
-                client_writer.write(await default_cipher.server_make_reply(self.socks_version, 0xFF, '0.0.0.0', 0))
+                reply_frames = await default_cipher.server_make_reply(self.socks_version, 0xFF, '0.0.0.0', 0)
+                client_writer.write(b''.join(reply_frames))
                 await client_writer.drain()
                 return
 
