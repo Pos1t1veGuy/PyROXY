@@ -129,8 +129,8 @@ class Socks5Server:
             else:
                 self.logger.warning(f'Suspicious client connected: {user}')
 
-        # except Exception as e:
-        #     self.logger.error(f"Connection error: {e}")
+        except Exception as e:
+            self.logger.error(f"Connection error: {e}")
 
         finally:
             await user.disconnect()
@@ -156,8 +156,8 @@ class Socks5Server:
                         self.bytes_sent += len(frame)
 
                 await writer.drain()
-        # except Exception as e:
-        #     self.logger.error(f"Proxying PIPE '{name}' error: {e}")
+        except Exception as e:
+            self.logger.error(f"Proxying PIPE '{name}' error: {e}")
         finally:
             stop_event.set()
             writer.close()

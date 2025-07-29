@@ -496,15 +496,15 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
         # Connecting to the local proxy, getting a command
         self.logger.debug('Local client connecting...')
-        # try:
-        user = await self.local_server.handshake(client_reader, client_writer, default_cipher)
-        # except Exception as e:
-        #     self.logger.error(
-        #         f"Can not do handshake to local proxy {self.local_server.host}:{self.local_server.port} — {e}"
-        #     )
-        #     client_writer.close()
-        #     await client_writer.wait_closed()
-        #     return
+        try:
+            user = await self.local_server.handshake(client_reader, client_writer, default_cipher)
+        except Exception as e:
+            self.logger.error(
+                f"Can not do handshake to local proxy {self.local_server.host}:{self.local_server.port} — {e}"
+            )
+            client_writer.close()
+            await client_writer.wait_closed()
+            return
         self.logger.info(f'Local client connected {user}')
         addr, port, command = await default_cipher.server_handle_command(
             self.socks_version, self.local_server.user_commands, client_reader
@@ -512,20 +512,20 @@ class Socks5_TCP_Retranslator(Socks5Client):
         self.logger.info(f'Local client {user} sent command {command.__qualname__}')
 
         # Connecting to the remote proxy, sending command
-        # try:
-        remote_session = await self.handshake(
-            proxy_host=self.remote_host, proxy_port=self.remote_port, username=self.username, password=self.password
-        )
-        # except ConnectionRefusedError:
-        #     self.logger.error(f"The server is not started {self.remote_host}:{self.remote_port}")
-        #     client_writer.close()
-        #     await client_writer.wait_closed()
-        #     return
-        # except Exception as e:
-        #     self.logger.error(f"Can not do handshake to remote proxy {self.remote_host}:{self.remote_port} — {e}")
-        #     client_writer.close()
-        #     await client_writer.wait_closed()
-        #     return
+        try:
+            remote_session = await self.handshake(
+                proxy_host=self.remote_host, proxy_port=self.remote_port, username=self.username, password=self.password
+            )
+        except ConnectionRefusedError:
+            self.logger.error(f"The server is not started {self.remote_host}:{self.remote_port}")
+            client_writer.close()
+            await client_writer.wait_closed()
+            return
+        except Exception as e:
+            self.logger.error(f"Can not do handshake to remote proxy {self.remote_host}:{self.remote_port} — {e}")
+            client_writer.close()
+            await client_writer.wait_closed()
+            return
         self.logger.debug(f'Client {user} handshaked with remote server')
 
 
