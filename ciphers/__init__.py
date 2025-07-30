@@ -16,9 +16,9 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from ..base_cipher import Cipher, REPLYES
 
 
-class AESCipherCTR(Cipher):
-    def __init__(self, key: bytes, iv: Optional[bytes] = None, iv_length: int = 16):
-        super().__init__(key, iv=iv)
+class AES_CTR(Cipher):
+    def __init__(self, key: bytes, iv: Optional[bytes] = None, iv_length: int = 16, **kwargs):
+        super().__init__(key, iv=iv, **kwargs)
         self.key = key
         self.iv = iv
         self.iv_length = iv_length
@@ -119,7 +119,25 @@ class AESCipherCTR(Cipher):
         return True
 
     async def client_command(self, socks_version: int, user_command: int, target_host: str, target_port: int) -> List[bytes]:
-        return self.encrypt(await super().client_command(socks_version, user_command, target_host, target_port))
+        try:
+            ip = ipa.ip_address(target_host)
+            if ip.version == 4: # IPv4
+                atyp = 0x01
+                addr_part = ip.packed
+            else: # IPv6
+                atyp = 0x04
+                addr_part = ip.packed
+        except ValueError: # domain
+            atyp = 0x03
+            addr_bytes = target_host.encode("idna")
+            length = len(addr_bytes)
+            if length > 255:
+                raise ValueError("Domain name too long for SOCKS5")
+            addr_part = struct.pack("!B", length) + addr_bytes
+
+        return self.encrypt(
+            struct.pack("!BBBB", socks_version, user_command, 0x00, atyp) + addr_part + struct.pack("!H", target_port)
+        )
 
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
                                     reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:
@@ -192,20 +210,20 @@ class AESCipherCTR(Cipher):
 
     def encrypt(self, data: bytes) -> List[bytes]:
         if not self.encryptor is None:
-            return [self.encryptor.encrypt(data)]
+            return [self.wrapper.wrap(self.encryptor.encrypt(data))]
         else:
             raise OSError(f'{self.__class__.__name__} needs to specify IV (init vector) in constructor or handshake')
 
     def decrypt(self, data: bytes) -> List[bytes]:
         if not self.encryptor is None:
-            return [self.decryptor.decrypt(data)]
+            return [self.decryptor.decrypt(self.wrapper.wrap(data))]
         else:
             raise OSError(f'{self.__class__.__name__} needs to specify IV (init vector) in constructor or handshake')
 
 
-class AESCipherCBC(Cipher):
-    def __init__(self, key: bytes, iv: Optional[bytes] = None, iv_length: int = 16):
-        super().__init__(key, iv=iv)
+class AES_CBC(Cipher):
+    def __init__(self, key: bytes, iv: Optional[bytes] = None, iv_length: int = 16, **kwargs):
+        super().__init__(key, iv=iv, **kwargs)
         self.key = key
         self.iv = iv
         self.iv_length = iv_length
@@ -451,11 +469,12 @@ class AESCipherCBC(Cipher):
                 if (i+1)*AES.block_size >= length:
                     chunk = pad(chunk, AES.block_size)
                 res.append(self.encryptor.encrypt(chunk))
-            return res
+            return self.wrapper.wrap(res)
         else:
             raise OSError(f'{self.__class__.__name__} needs to specify IV (init vector) in constructor or handshake')
 
     def decrypt(self, data: bytes) -> List[bytes]:
+        data = self.wrapper.unwrap(data)
         if not self.decryptor is None:
             res = []
             for chunk_start in range(0, len(data), AES.block_size):
@@ -468,8 +487,8 @@ class AESCipherCBC(Cipher):
 
 
 class ChaCha20_Poly1305(Cipher):
-    def __init__(self, key: bytes, nonce_length: int = 12):
-        super().__init__(key, nonce_length=nonce_length)
+    def __init__(self, key: bytes, nonce_length: int = 12, **kwargs):
+        super().__init__(key, nonce_length=nonce_length, **kwargs)
         self.key = key
         self.nonce_length = nonce_length
         self.cipher = ChaCha20Poly1305(key)
@@ -695,9 +714,10 @@ class ChaCha20_Poly1305(Cipher):
             nonce = self.nonce
             result.append(len(chunk).to_bytes(2, byteorder='big') + nonce + self.cipher.encrypt(nonce, chunk, None))
 
-        return result
+        return self.wrapper.wrap(result)
 
     def decrypt(self, data: bytes) -> List[bytes]:
+        data = self.wrapper.unwrap(data)
         if len(self._decoder_buffer) > 65535:
             self._decoder_buffer = b''
         self._decoder_buffer += data

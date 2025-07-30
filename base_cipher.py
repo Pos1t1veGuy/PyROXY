@@ -5,11 +5,14 @@ import asyncio
 import logging
 import ipaddress as ipa
 
+from .base_wrapper import Wrapper
+
 
 '''
 SOCKS5 HANDSHAKE STRUCTURE (client and server):
 
-To establish a SOCKS5 connection, both the client and server must follow a specific handshake protocol,
+The ciphers encrypt the handshake using several methods and the main data stream.
+To establish a SOCKS5 connection, both the client and server must follow a specific HANDSHAKE protocol,
 which typically consists of 4–5 stages. This class defines symmetric methods for both parties.
 
 ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
@@ -63,29 +66,35 @@ REPLYES = {
     0x08: "ADDRESS_TYPE_NOT_SUPPORTED",
     0xFF: "CONNECTION_NOT_ALLOWED",
 }
+REPLYES_CODES = {
+    "succeeded": 0x00,
+    "failure": 0x01,
+    "not_allowed": 0x02,
+    "network_unreachable": 0x03,
+    "host_unreachable": 0x04,
+    "refused": 0x05,
+    "ttl_expired": 0x06,
+    "cmd_not_supported": 0x07,
+    "atype_not_supported": 0x08,
+    "not_allowed": 0xFF,
+}
 
 
 class Cipher:
-    def __init__(self, *args, **kwargs):
-        self.logger = logging.getLogger(__name__)
+    def __init__(self, *args, wrapper: Wrapper = Wrapper(), **kwargs):
+        self.wrapper = wrapper
+        self.client_hello = self.wrapper.client_hello
+        self.server_hello = self.wrapper.server_hello
         self.is_client = False
         self.is_server = False
+        self.is_handshaked = False
         self._init_args = args
-        self._init_kwargs = kwargs
+        self._init_kwargs = {'wrapper': wrapper, **kwargs}
 
     def copy(self) -> 'Cipher':
         return self.__class__(*self._init_args, **self._init_kwargs)
 
-    async def client_hello(self, client: 'Socks5Client', reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
-        self.logger.debug(f'{self.__class__.__name__} client_hello')
-        return True
-
-    async def server_hello(self, server: 'Socks5Server', reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
-        self.logger.debug(f'{self.__class__.__name__} server_hello')
-        return True
-
     async def client_send_methods(self, socks_version: int, methods: List[int]) -> List[bytes]:
-        self.logger.debug(f'{self.__class__.__name__} The client sent an auth methods {methods}')
         return [bytes([
             socks_version,
             len(methods),
@@ -93,7 +102,6 @@ class Cipher:
         ])]
 
     async def server_get_methods(self, socks_version: int, reader: asyncio.StreamReader) -> Dict[str, bool]:
-        self.logger.debug(f'{self.__class__.__name__} The server received an auth client methods')
         version, nmethods = await reader.readexactly(2)
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
@@ -107,11 +115,9 @@ class Cipher:
         }
 
     async def server_send_method_to_user(self, socks_version: int, method: int) -> List[bytes]:
-        self.logger.debug(f'{self.__class__.__name__} The server sent an auth method {method}')
         return [bytes([socks_version, method])]
 
     async def client_get_method(self, socks_version: int, reader: asyncio.StreamReader) -> int:
-        self.logger.debug(f'{self.__class__.__name__} The client received selected an auth method')
         response = await reader.readexactly(2)
 
         if response[0] != socks_version:
@@ -123,7 +129,6 @@ class Cipher:
 
     async def server_auth_userpass(self, logins: Dict[str, str], reader: asyncio.StreamReader,
                             writer: asyncio.StreamWriter) -> Optional[Tuple[str, str]]:
-        self.logger.debug(f'{self.__class__.__name__} The server authorizes the client')
         auth_version = (await reader.readexactly(1))[0]
 
         if auth_version == 1:
@@ -143,7 +148,6 @@ class Cipher:
 
     async def client_auth_userpass(self, username: str, password: str, reader: asyncio.StreamReader,
                                    writer: asyncio.StreamWriter) -> bool:
-        self.logger.debug(f'{self.__class__.__name__} The client logs in to the server')
         username_bytes = username.encode()
         password_bytes = password.encode()
 
@@ -158,7 +162,6 @@ class Cipher:
             raise ConnectionError(f'Invalid answer received {resp}')
 
     async def client_command(self, socks_version: int, user_command: int, target_host: str, target_port: int) -> bytes:
-        self.logger.debug(f'{self.__class__.__name__} The client sent command {user_command} to the server')
         try:
             ip = ipa.ip_address(target_host)
             if ip.version == 4: # IPv4
@@ -181,7 +184,6 @@ class Cipher:
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
                              reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:
 
-        self.logger.debug(f'{self.__class__.__name__} The server received a command')
         version, cmd, rsv, address_type = await reader.readexactly(4)
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
@@ -209,7 +211,6 @@ class Cipher:
         return addr, port, cmd
 
     async def server_make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> List[bytes]:
-        self.logger.debug(f'{self.__class__.__name__} The server makes a reply {reply_code}')
         address_type = 0x01
         length = 4
         addr_data = socket.inet_aton("0.0.0.0")
@@ -247,7 +248,6 @@ class Cipher:
         )]
 
     async def client_connect_confirm(self, reader: asyncio.StreamReader) -> Tuple[str, str]:
-        self.logger.debug(f'{self.__class__.__name__} The client confirms connection')
         hdr = await reader.readexactly(4)
         ver, rep, rsv, atyp = hdr
 
@@ -278,10 +278,8 @@ class Cipher:
         return address, struct.unpack('!H', port_bytes)[0]
 
 
-    @staticmethod
-    def encrypt(data: bytes) -> List[bytes]:
-        return [data]
+    def encrypt(self, data: bytes) -> List[bytes]:
+        return [self.wrapper.wrap(data)]
 
-    @staticmethod
-    def decrypt(data: bytes) -> List[bytes]:
-        return [data]
+    def decrypt(self, data: bytes) -> List[bytes]:
+        return [self.wrapper.unwrap(data)]

@@ -6,8 +6,8 @@ from pathlib import Path
 from logging.handlers import TimedRotatingFileHandler
 
 from ..proxy_server import Socks5Server
-from ..ext.wrap_ciphers import *
-from ..ext.ciphers import *
+from ..ciphers import *
+from ..wrappers import HTTP_WS_Wrapper
 
 
 users_file = Path(__file__).parent / "users.json"
@@ -37,8 +37,8 @@ users = json.load(open(users_file, 'r', encoding='utf-8'))
 SERVER = Socks5Server(
     users=users['users'],
     accept_anonymous=users['accept_anonymous'],
-    cipher=ChaCha20_Poly1305_HTTPWS(key=b'\x86P\x0e\xd3\xd4\xf2\xbc\x19\x1f\x98\xc5\xd0e\xf3X\x07\xf7\xd5R_\x9b\x1c\x92R\xe0}JY\x94\x01nF'),
-    udp_cipher=AESCipherCTR(key=hashlib.sha256(key).digest()),
+    cipher=ChaCha20_Poly1305(key=b'\x86P\x0e\xd3\xd4\xf2\xbc\x19\x1f\x98\xc5\xd0e\xf3X\x07\xf7\xd5R_\x9b\x1c\x92R\xe0}JY\x94\x01nF', wrapper=HTTP_WS_Wrapper()),
+    udp_cipher=AES_CTR(key=hashlib.sha256(key).digest()),
     port=180
 )
 # SERVER.logger.addHandler(file_handler)

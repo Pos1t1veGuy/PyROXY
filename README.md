@@ -20,7 +20,7 @@ Designed for **customizable handshake obfuscation** and **traffic encryption**.
 
 ```bash
 git clone https://github.com/Pos1t1veGuy/my_proxy.git
-cd my_proxy/ext
+cd my_proxy/ciphers
 pip install -r requirements.txt
 ```
 

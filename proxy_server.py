@@ -7,7 +7,7 @@ import socket
 import time
 
 from .logger_setup import *
-from .base_cipher import Cipher
+from .base_cipher import Cipher, REPLYES_CODES
 
 
 MAX_PAYLOAD_UDP = 65535
@@ -71,6 +71,7 @@ class Socks5Server:
             client_ip, client_port = writer.get_extra_info("peername")
             user = await self.add_user(client_ip, client_port, writer)
 
+        self.logger.debug('The server getting an auth methods')
         methods = await cipher.server_get_methods(self.socks_version, reader)
 
         if methods['supports_no_auth'] and self.accept_anonymous:
@@ -82,6 +83,7 @@ class Socks5Server:
             data = await cipher.server_send_method_to_user(self.socks_version, 0x02)
             await self.send(user, data, log_bytes=False)
 
+            self.logger.debug('The server is authorizing the client')
             auth_data = await cipher.server_auth_userpass(self.users_auth_data, reader, writer)
             if not auth_data:
                 raise ConnectionError(f"Wrong authentication data {user}")
@@ -94,6 +96,7 @@ class Socks5Server:
             raise ConnectionError(f'Can not use authentication method {user} - {ms}')
 
         user.handshaked = True
+        cipher.is_handshaked = True
         self.logger.debug(f'{user} is handshaked')
         return user
 
@@ -115,22 +118,26 @@ class Socks5Server:
         try:
             if await cipher.server_hello(self, reader, writer):
                 self.logger.debug(f"Sent server_hello")
-                await self.handshake(reader, writer, cipher, user=user)
+                try:
+                    await self.handshake(reader, writer, cipher, user=user)
+                except ConnectionError as e:
+                    self.logger.error(f'Suspicious client tried to connect: {user} => {e}')
+                    return
 
                 self.logger.info(f"{user} is connected")
                 addr, port, command = await cipher.server_handle_command(
                     self.socks_version, self.user_commands, reader
                 )
-                self.logger.info(f'Client {user} sent command {command.__qualname__}')
+                self.logger.info(f'Client {user} sent command {command.__qualname__} to {addr}:{port}')
 
                 connection_result = await command(self, addr, port, user, cipher, reader, writer)
                 self.logger.info(f'Сompleted the operation successfully, code: {connection_result}')
 
             else:
-                self.logger.warning(f'Suspicious client connected: {user}')
+                self.logger.warning(f'Suspicious client tried to connect: {user}')
 
-        except Exception as e:
-            self.logger.error(f"Connection error: {e}")
+        # except Exception as e:
+        #     self.logger.error(f"Connection error: {e}")
 
         finally:
             await user.disconnect()
@@ -138,6 +145,7 @@ class Socks5Server:
     async def pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, stop_event: asyncio.Event,
                    name: str = 'default', encrypt: Optional[callable] = None, decrypt: Optional[callable] = None):
         try:
+            buffer = bytearray()
             while not reader.at_eof():
                 data = await reader.read(4096)
                 if not data:
@@ -307,7 +315,7 @@ class UDPServerProxy(asyncio.DatagramProtocol):
 
     def handle_client(self, data: bytes, addr: Tuple[str, int]):
         try:
-            data = self.cipher.decrypt(data)
+            data = b''.join(self.cipher.decrypt(data))
             if len(data) < 4:
                 self.logger.warning("UDP packet too short for SOCKS5 header.")
                 return
@@ -448,7 +456,7 @@ class ConnectionMethods:
             await client_writer.drain()
         except Exception as e:
             server.logger.warning(f"Failed to connect to {addr}:{port} => {e}")
-            reply_frames = await cipher.server_make_reply(server.socks_version, 0xFF, '0.0.0.0', 0)
+            reply_frames = await cipher.server_make_reply(server.socks_version, REPLYES_CODES['host_unreachable'], '0.0.0.0', 0)
             client_writer.write(b''.join(reply_frames))
             await client_writer.drain()
             return 1

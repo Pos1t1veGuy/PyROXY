@@ -48,10 +48,11 @@ class Socks5Client:
         if username and password:
             methods.insert(0, 0x02)
 
+        self.logger.debug("Sent auth methods")
         methods_msg = await session.cipher.client_send_methods(self.socks_version, methods)
         await session.asend(methods_msg, encrypt=False, log_bytes=False)
+        self.logger.debug("Receiving server auth method")
         method_chosen = await session.cipher.client_get_method(self.socks_version, reader)
-        self.logger.debug("Sent client_hello")
 
         try:
             if method_chosen == 0xFF:
@@ -61,6 +62,7 @@ class Socks5Client:
                 if not username or not password:
                     raise ConnectionError("Proxy requires username/password authentication, but none provided")
 
+                self.logger.debug("Client is authorizing")
                 auth_ok = await session.cipher.client_auth_userpass(username, password, reader, writer)
                 if not auth_ok:
                     raise ConnectionError("Authentication failed")
@@ -73,6 +75,7 @@ class Socks5Client:
                 raise ConnectionError(f"Unsupported authentication method selected by proxy: {method_chosen}")
 
             self.logger.debug("Handshaked")
+            session.cipher.is_handshaked = True
             return session
         except Exception as ex:
             self.logger.error(ex)
@@ -337,7 +340,7 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
 
     def send(self, data: bytes):
         header_socks5 = self.format_socks5_udp_header(self.host, self.port)
-        self.raw_send(self.cipher.encrypt(header_socks5 + data))
+        self.raw_send(b''.join(self.cipher.encrypt(header_socks5 + data)))
         self.logger.debug(f"Sent {len(data)} bytes to UDP proxy {self.addr}")
 
     async def async_recv(self, timeout: int = 5) -> Tuple[bytes, Tuple[str, int]]:
