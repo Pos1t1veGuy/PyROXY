@@ -49,7 +49,7 @@ class Socks5Server:
         self.bytes_received = 0
         self.stop = False
 
-    async def async_start(self):
+    async def start(self):
         try:
             self.asyncio_server = await asyncio.start_server(self.handle_client, self.host, self.port)
             cip_name = self.cipher.__class__.__name__
@@ -59,11 +59,6 @@ class Socks5Server:
         except KeyboardInterrupt:
             self.logger.info("Server is closed")
 
-    def start(self):
-        try:
-            asyncio.run(self.async_start())
-        except KeyboardInterrupt:
-            self.logger.info("Server is closed")
 
     async def handshake(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, cipher: 'Cipher',
                         user: Optional['User'] = None) -> 'User':
@@ -99,7 +94,6 @@ class Socks5Server:
         cipher.is_handshaked = True
         self.logger.debug(f'{user} is handshaked')
         return user
-
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         client_ip, client_port = writer.get_extra_info("peername")
@@ -210,17 +204,12 @@ class Socks5Server:
             pass
         self.logger.info(f'{user} is disconnected')
 
-    async def async_close(self):
+    async def close(self):
         self.stop = True
         self.logger.info("Shutting down TCP server...")
         self.asyncio_server.close()
         await self.asyncio_server.wait_closed()
         self.logger.info("Server is closed")
-
-    def close(self):
-        self._loop.run_until_complete(self.async_close())
-        self._loop.stop()
-        self._loop.close()
 
 
     async def __aenter__(self):
@@ -229,7 +218,7 @@ class Socks5Server:
         self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port} using cipher {cip_name}")
         return self
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.async_close()
+        await self.close()
 
     def __str__(self):
         return f'{self.__class__.__name__}(host="{self.host}", port={self.port}, cipher={self.cipher})'

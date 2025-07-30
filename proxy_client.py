@@ -98,12 +98,6 @@ class Socks5Client:
         self.logger.debug(f"Connected to {target_host}:{target_port} through proxy")
         return session
 
-    def sync_connect(self, target_host: str, target_port: int,
-                proxy_host: str = '127.0.0.1', proxy_port: int = 1080,
-                username: Optional[str] = None, password: Optional[str] = None) -> 'TCP_ProxySession':
-        return asyncio.run(self.async_connect(target_host, target_port,
-                                    proxy_host=proxy_host, proxy_port=proxy_port, username=username, password=password))
-
     async def udp_associate(self, target_host: str, target_port: int,
                                   proxy_host: str = '127.0.0.1', proxy_port: int = 1080,
                                   username: Optional[str] = None, password: Optional[str] = None
@@ -122,13 +116,6 @@ class Socks5Client:
         self.logger.debug(f"Got an associated UDP server {udp_session.host}:{udp_session.port} through proxy")
         return udp_session, session
 
-    def sync_udp_associate(self, target_host: str, target_port: int,
-                      proxy_host: str = '127.0.0.1', proxy_port: int = 1080,
-                      username: Optional[str] = None, password: Optional[str] = None
-                      ) -> Tuple[str, str, 'TCP_ProxySession']:
-        return asyncio.run(self.async_udp_associate(target_host, target_port,
-                                    proxy_host=proxy_host, proxy_port=proxy_port, username=username, password=password))
-
 
     async def close(self, session: Optional['Session'] = None):
         if session:
@@ -139,18 +126,10 @@ class Socks5Client:
                 await session.close()
             self.logger.info(f"{len(self.sessions)} connections closed")
 
-    def sync_close(self, session: Optional['Session'] = None):
-        asyncio.run(self.close(session=session))
-
     async def __aenter__(self):
         return self
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
-
-    def __enter__(self):
-        return self
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.sync_close()
 
     def __str__(self):
         return f'{self.__class__.__name__}({len(self.sessions)} connections, cipher={self.cipher.__class__.__name__})'
@@ -179,16 +158,19 @@ class TCP_ProxySession:
         if encrypt:
             data = self.cipher.encrypt(data)
 
+        length = 0
         if isinstance(data, list):
             for frame in data:
                 if self.log_bytes and log_bytes:
                     self.bytes_sent += len(frame)
                 self.writer.write(frame)
+                length += len(frame)
         else:
             self.writer.write(data)
+            length = len(data)
         if wait:
             await self.writer.drain()
-        self.logger.debug(f"Sent {len(data)} bytes to TCP proxy {self.addr}")
+        self.logger.debug(f"Sent {length} bytes to TCP proxy {self.addr}")
 
     def send(self, data: Union[bytes, List[bytes]], encrypt: bool = True, log_bytes: bool = True, wait: bool = True):
         return asyncio.run(self.asend(data, encrypt=encrypt, log_bytes=log_bytes, wait=wait))
@@ -223,9 +205,6 @@ class TCP_ProxySession:
         self.logger.debug(f"Readed {len(data)} bytes from TCP proxy {self.addr}")
         return data
 
-    def read(self, num_bytes: int = -1, decrypt: bool = True, log_bytes: bool = True, **kwargs) -> bytes:
-        return asyncio.run(self.aread(num_bytes=num_bytes, decrypt=decrypt, log_bytes=log_bytes, **kwargs))
-
     async def areadexactly(self, num_bytes: int, decrypt: bool = True, log_bytes: bool = True, **kwargs) -> bytes:
         buffer_length = len(self._pt_buffer)
         if num_bytes == buffer_length:
@@ -243,9 +222,6 @@ class TCP_ProxySession:
 
         self.logger.debug(f"Readed {len(data)} bytes from TCP proxy {self.addr}")
         return data
-
-    def readexactly(self, num_bytes: int, decrypt: bool = True, log_bytes: bool = True, **kwargs) -> bytes:
-        return asyncio.run(self.areadexactly(num_bytes, decrypt=decrypt, log_bytes=log_bytes, **kwargs))
 
     async def areaduntil(self, sep: Union[str, bytes] = '\n', decrypt: bool = True, log_bytes: bool = True,
                          bytes_block: int = 1024, limit: int = 65535, **kwargs) -> bytes:
@@ -292,18 +268,10 @@ class TCP_ProxySession:
         self.logger.debug(f"Readed {len(data)} bytes from TCP proxy {self.addr}")
         return data
 
-    def readuntil(self, sep: Union[str, bytes] = '\n', decrypt: bool = True, log_bytes: bool = True,
-                  bytes_block: int = 1024, limit: int = 65535, **kwargs) -> bytes:
-        return asyncio.run(self.areaduntil(sep=sep, decrypt=decrypt, log_bytes=log_bytes, bytes_block=bytes_block,
-                                           limit=limit **kwargs))
-
     async def areadline(self, log_bytes: bool = True, decrypt: bool = True, limit: int = 65535, **kwargs) -> bytes:
         if 'sep' in kwargs.keys():
             kwargs.pop('sep')
         return await self.areaduntil(self.reader, sep='\n', decrypt=decrypt, log_bytes=log_bytes, limit=limit, **kwargs)
-
-    def readline(self, log_bytes: bool = True, decrypt: bool = True, limit: int = 65535, **kwargs) -> bytes:
-        return asyncio.run(self.areadline(log_bytes=log_bytes, decrypt=decrypt, limit=limit, **kwargs))
 
 
     async def close(self):
@@ -311,18 +279,14 @@ class TCP_ProxySession:
         await self.writer.wait_closed()
         self.closed = True
         self.logger.debug(f"{self.client} session closed to {self.addr}")
-    def sync_close(self):
-        asyncio.run(self.close())
 
     async def __aenter__(self):
         return self
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
 
-    def __enter__(self):
-        return self
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.sync_close()
+    def __str__(self):
+        return f'{self.__class__.__name__}(host={self.host}, port={self.port})'
 
 class UDP_ProxySession(asyncio.DatagramProtocol):
     def __init__(self, cipher: 'Cipher'):
@@ -343,13 +307,10 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
         self.raw_send(b''.join(self.cipher.encrypt(header_socks5 + data)))
         self.logger.debug(f"Sent {len(data)} bytes to UDP proxy {self.addr}")
 
-    async def async_recv(self, timeout: int = 5) -> Tuple[bytes, Tuple[str, int]]:
+    async def recv(self, timeout: int = 5) -> Tuple[bytes, Tuple[str, int]]:
         data = await asyncio.wait_for(self.raw_recv(), timeout=timeout)
         self.logger.debug(f"Readed {len(data)} bytes from UDP proxy {self.addr}")
         return self.cipher.decrypt(data[0]), data[1]
-
-    def recv(self, timeout: int = 5) -> Tuple[bytes, Tuple[str, int]]:
-        return asyncio.run(self.udp_recv(timeout=timeout))
 
 
     def format_socks5_udp_header(self, host: str, port: int) -> bytes:
