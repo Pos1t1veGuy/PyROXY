@@ -1,4 +1,4 @@
-# 🔐 SOCKS5 Proxy with Custom Encryption
+# 🔐 PyROXY: SOCKS5 Proxy with Custom Encryption
 
 There is a client and a server with interfaces for working in code and for retransmitting system traffic through proxy
 clients (like Proxifier).
@@ -18,7 +18,7 @@ GET to server makes correct response page with `index.html`. So you can even see
 
 ## 📦 Installation
 ```commandline
-git clone https://github.com/Pos1t1veGuy/my_proxy.git
+git clone https://github.com/Pos1t1veGuy/PyROXY.git
 ```
 By default proxy have not requirements, but modules have. `requirements.txt` is in a modules folders (ciphers, wrappers),
 you may install it by:
@@ -38,9 +38,9 @@ For example here is client-server tunnel with AES CTR cipher and HTTP_WS wrapper
 ### Server:
 ```python
 import hashlib
-from my_proxy import Socks5Server
-from my_proxy.ciphers import AES_CTR
-from my_proxy.wrappers import HTTP_WS_Wrapper
+from pyroxy import Socks5Server
+from pyroxy.ciphers import AES_CTR
+from pyroxy.wrappers import HTTP_WS_Wrapper
 
 key = hashlib.sha256(b'my master key').digest()
 SERVER = Socks5Server(users={
@@ -54,9 +54,9 @@ Client:
 ```python
 import os
 import hashlib
-from my_proxy import Socks5Client
-from my_proxy.ciphers import AES_CTR
-from my_proxy.wrappers import HTTP_WS_Wrapper
+from pyroxy import Socks5Client
+from pyroxy.ciphers import AES_CTR
+from pyroxy.wrappers import HTTP_WS_Wrapper
 
 async def main():
     key = hashlib.sha256(b'my master key').digest()[:16]
