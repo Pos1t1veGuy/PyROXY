@@ -157,7 +157,7 @@ class Cipher:
 
         resp = await reader.readexactly(2)
         try:
-            return resp[1] == 0x00
+            return resp[1] == REPLYES_CODES['succeeded']
         except IndexError:
             raise ConnectionError(f'Invalid answer received {resp}')
 
@@ -177,8 +177,7 @@ class Cipher:
                 raise ValueError("Domain name too long for SOCKS5")
             addr_part = struct.pack("!B", len(addr_bytes)) + addr_bytes
 
-        request = struct.pack("!BBB", socks_version, user_command, 0x00)
-        request += struct.pack("!B", atyp) + addr_part + struct.pack("!H", target_port)
+        request = struct.pack("!BBBB", socks_version, user_command, 0x00, atyp) + addr_part + struct.pack("!H", target_port)
         return request
 
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],

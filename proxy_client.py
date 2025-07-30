@@ -6,7 +6,7 @@ import ipaddress
 import struct
 
 from .logger_setup import *
-from .base_cipher import Cipher
+from .base_cipher import Cipher, REPLYES_CODES
 from .proxy_server import Socks5Server, ConnectionMethods, UDPServerProxy
 
 
@@ -504,12 +504,16 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
             try:
                 local_ip, local_port = remote_session.writer.get_extra_info("sockname")
-                reply_frames = await default_cipher.server_make_reply(self.socks_version, 0x00, local_ip, local_port)
+                reply_frames = await default_cipher.server_make_reply(
+                    self.socks_version, REPLYES_CODES['succeeded'], local_ip, local_port
+                )
                 client_writer.write(b''.join(reply_frames))
                 await client_writer.drain()
             except Exception as e:
                 self.logger.warning(f"Failed to connect to {addr}:{port} => {e}")
-                reply_frames = await default_cipher.server_make_reply(self.socks_version, 0xFF, '0.0.0.0', 0)
+                reply_frames = await default_cipher.server_make_reply(
+                    self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0
+                )
                 client_writer.write(b''.join(reply_frames))
                 await client_writer.drain()
                 return
@@ -542,7 +546,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
                 udp_session = Socks5_UDP_Retranslator.create(remote_session.cipher)
             except Exception as e:
                 self.logger.error(f"Failed to start UDP relay: {e}")
-                reply = await cipher.server_make_reply(self.socks_version, 0x01, '0.0.0.0', 0)
+                reply = await cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0)
                 client_writer.write(reply)
                 await client_writer.drain()
                 return 1
@@ -552,12 +556,12 @@ class Socks5_TCP_Retranslator(Socks5Client):
             self.logger.info(f"Started UDP server for {addr}:{port} at {udp_host}:{udp_port}")
 
             try:
-                reply = await default_cipher.server_make_reply(self.socks_version, 0x00, udp_host, udp_port)
+                reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['succeeded'], udp_host, udp_port)
                 client_writer.write(reply)
                 await client_writer.drain()
             except Exception as e:
                 self.logger.warning(f"Failed to make UDP connection at TCP {addr}:{port}; UDP {udp_host}:{udp_port} => {e}")
-                client_writer.write(await default_cipher.server_make_reply(self.socks_version, 0xFF, '0.0.0.0', 0))
+                client_writer.write(await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0))
                 await client_writer.drain()
                 return
 

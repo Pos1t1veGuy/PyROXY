@@ -440,7 +440,7 @@ class ConnectionMethods:
         try:
             remote_reader, remote_writer = await asyncio.open_connection(addr, port)
             local_ip, local_port = remote_writer.get_extra_info("sockname")
-            reply_frames = await cipher.server_make_reply(server.socks_version, 0x00, local_ip, local_port)
+            reply_frames = await cipher.server_make_reply(server.socks_version, REPLYES_CODES['succeeded'], local_ip, local_port)
             client_writer.write(b''.join(reply_frames))
             await client_writer.drain()
         except Exception as e:
@@ -481,7 +481,7 @@ class ConnectionMethods:
             )
         except Exception as e:
             server.logger.error(f"Failed to start UDP relay: {e}")
-            reply = b''.join(await cipher.server_make_reply(server.socks_version, 0x01, '0.0.0.0', 0))
+            reply = b''.join(await cipher.server_make_reply(server.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0))
             client_writer.write(reply)
             await client_writer.drain()
             return 1
@@ -491,7 +491,7 @@ class ConnectionMethods:
         server.logger.info(f"Started UDP server for {addr}:{port} at {udp_host}:{udp_port}")
 
         try:
-            reply = b''.join(await cipher.server_make_reply(server.socks_version, 0x00, udp_host, udp_port))
+            reply = b''.join(await cipher.server_make_reply(server.socks_version, REPLYES_CODES['succeeded'], udp_host, udp_port))
             client_writer.write(reply)
             await client_writer.drain()
         except Exception as e:
