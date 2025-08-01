@@ -42,4 +42,4 @@ SERVER = Socks5Server(
     port=180
 )
 # SERVER.logger.addHandler(file_handler)
-SERVER.start()
+asyncio.run(SERVER.start())

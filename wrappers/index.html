@@ -1,25 +1,105 @@
 <html>
-<head><title>Welcome</title></head>
+<head>
+    <title>Hello, Roxy!</title>
+    <link rel="icon" type="image/png" href="/r0xy.png">
+    <style>
+        body {
+            background-color: #111;
+            color: #0f0;
+            font-family: monospace;
+            text-align: center;
+            margin-top: 100px;
+            user-select: none;
+        }
+
+        #fun-button {
+            padding: 10px 20px;
+            font-size: 18px;
+            background-color: #333;
+            color: #0f0;
+            border: 2px solid #0f0;
+            cursor: pointer;
+            position: absolute;
+            left: 50%;
+            top: 200px;
+        }
+
+        #fun-message {
+            margin-top: 30px;
+            font-size: 20px;
+        }
+
+        h1 {
+            animation: blink 2s infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+    </style>
+</head>
 <body>
-    <h1>Hello World!</h1>
+    <h1>You can trust Roxy with your security =)</h1>
+
+    <button id="fun-button">🚨🚨DON`T CLICK!🚨🚨</button>
+    <div id="fun-message"></div>
+
     <script>
         const sock = new WebSocket("ws://" + window.location.host + "/ws");
-
         sock.onopen = () => {
             sock.send("123");
         };
-
         sock.onmessage = (event) => {
             console.log("Received from server:", event.data);
         };
-
         sock.onerror = (err) => {
             console.error("WebSocket error:", err);
         };
-
         sock.onclose = () => {
             console.log("WebSocket connection closed");
         };
+
+        const phrases = [
+            "НЕ СМОТРИ НА МЕНЯ ТАК",
+            "roxy_watching_you()",
+            "trust_me(), I’m safe",
+            "Ваш трафик под защитой (или нет)",
+            "️Hello again...",
+            "Hello World!",
+            "let clicks = 0;",
+            "DON`T CLICKKKK!!!!!1",
+            "?",
+            "👁"
+        ];
+
+        const button = document.getElementById('fun-button');
+        const msg = document.getElementById("fun-message");
+        let clicks = 0;
+
+        function random(min, max) {
+            return Math.random() * (max - min) + min;
+        }
+
+        button.addEventListener("click", () => {
+            clicks++
+            const margin = Math.sqrt(button.offsetWidth**2, button.offsetHeight**2);
+            const x = random(0, window.innerWidth - margin);
+            const y = random(0, window.innerHeight - margin);
+            const angle = random(0, 360);
+
+            button.style.left = `${x}px`;
+            button.style.top = `${y}px`;
+            if (clicks >= 5) {
+                button.style.transform = `rotate(${angle}deg)`;
+            }
+            if (clicks == 5) {
+                phrases.push("Ты не устал жмякать на кнопку?");
+                phrases.push("NaN");
+            }
+
+            msg.textContent = phrases[Math.floor(Math.random() * phrases.length)];
+        });
     </script>
 </body>
 </html>

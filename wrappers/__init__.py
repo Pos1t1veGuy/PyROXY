@@ -3,6 +3,7 @@ import asyncio
 import base64
 import hashlib
 import os
+from pathlib import Path
 from fake_useragent import UserAgent
 
 from ..base_wrapper import Wrapper
@@ -12,20 +13,23 @@ class HTTP_WS_Wrapper(Wrapper):
     GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
     def __init__(self, http_path: str = "/", ws_path: str = "/ws/", host: str = "example.com",
-                 http_response_file: Optional[str] = None, timeout: int = 5):
+                 icon_path: Optional[str] = None, http_response_file: Optional[str] = None, timeout: int = 5):
         self.http_path = http_path
         self.ws_path = ws_path
         self.host = host
         self.timeout = timeout
         self.client_user_agent = user_agent = UserAgent().random
 
+        if icon_path is None:
+            self.icon_path = Path(__file__).parent / "r0xy.png"
+        else:
+            self.icon_path = Path(icon_path)
+
         if http_response_file is None:
             http_response_file = os.path.dirname(__file__) + '/index.html'
         if not os.path.isfile(http_response_file):
             raise FileNotFoundError(f"HTTP response file '{http_response_file}' not found")
         self.http_file_path = http_response_file
-        with open(http_response_file, 'r', encoding='utf-8') as f:
-            self.http_response = f.read().strip()
         self.http_content_length = len(self.http_response.encode())
 
         self._mask_offset = 0
@@ -159,31 +163,46 @@ Connection: close
 
             if method != "GET":
                 return await self.http_error(writer, 405)
-            if path != self.http_path:
-                return await self.http_error(writer, 404)
             if not 'Host:' in request_str:
                 await asyncio.sleep(self.timeout)
                 return await self.http_error(writer, 408)
 
-            response = (
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: text/html; charset=utf-8\r\n"
-                f"Content-Length: {self.http_content_length}\r\n"
-                "Cache-Control: no-cache, no-store, must-revalidate\r\n"
-                "Pragma: no-cache\r\n"
-                "Expires: 0\r\n"
-                "Connection: close\r\n"
-                "X-Powered-By: PHP/7.4.3\r\n"
-                "\r\n"
-                f"{self.http_response}"
-            )
+            if path == '/' + self.icon_path.name:
+                await self.handle_favicon(reader, writer)
+            elif path == self.http_path:
+                response = (
+                    "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: text/html; charset=utf-8\r\n"
+                    f"Content-Length: {self.http_content_length}\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                    f"{self.http_response}"
+                )
 
-            writer.write(response.encode())
-            await writer.drain()
-            return True
+                writer.write(response.encode())
+                await writer.drain()
+
+                return True
+            else:
+                return await self.http_error(writer, 404)
+
         except Exception as ex:
             server.logger.error(f'Server hello error: {ex}')
             return await self.http_error(writer, 500)
+
+    async def handle_favicon(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        with open(self.icon_path, 'rb') as f:
+            icon_data = f.read()
+
+        response = (
+                b'HTTP/1.1 200 OK\r\n'
+                b'Content-Type: image/png\r\n'
+                b'Content-Length: ' + str(len(icon_data)).encode() + b'\r\n'
+                b'Connection: close\r\n'
+                b'\r\n' + icon_data
+        )
+        writer.write(response)
+        await writer.drain()
 
     async def ws_client_hello(self, client: 'Socks5Client', reader: asyncio.StreamReader,
                               writer: asyncio.StreamWriter) -> bool:
@@ -258,7 +277,16 @@ Connection: close
         return http and ws
 
     async def http_error(self, writer, num: int) -> bool:
-        writer.write(self.errors[num])
-        await writer.drain()
-        writer.close()
-        return False
+        try:
+            writer.write(self.errors[num])
+            await writer.drain()
+            writer.close()
+            return False
+        except ConnectionResetError:
+            pass
+
+
+    @property
+    def http_response(self) -> str:
+        with open(self.http_file_path, 'r', encoding='utf-8') as f:
+            return f.read().strip()
