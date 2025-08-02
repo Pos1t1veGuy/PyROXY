@@ -18,7 +18,7 @@ class Socks5Server:
                  host: str = '127.0.0.1', port: int = 1080,
                  user_white_list: Optional[Set[str]] = None,
                  users_black_list: Optional[Set[str]] = None,
-                 cipher: Optional[Cipher] = None,
+                 ciphers: List[Cipher] = [Cipher()],
                  udp_cipher: Optional[Cipher] = None,
                  udp_server_timeout: int = 5*60,
                  users: Optional[Dict[str, str]] = None,
@@ -35,11 +35,12 @@ class Socks5Server:
         self.users_black_list = users_black_list
         self.log_bytes = log_bytes # only after handshake
         self.udp_server_timeout = udp_server_timeout
-        self.cipher = Cipher() if cipher is None else cipher
+        self.ciphers = ciphers
         self.udp_cipher = Cipher() if udp_cipher is None else udp_cipher
         self.logger = logging.getLogger(__name__)
 
-        self.cipher.is_server = True
+        for cipher in self.ciphers:
+            cipher.is_server = True
         self.udp_cipher.is_server = True
 
         self.user_commands = USER_COMMANDS if user_commands is None else user_commands
@@ -52,8 +53,7 @@ class Socks5Server:
     async def start(self):
         try:
             self.asyncio_server = await asyncio.start_server(self.handle_client, self.host, self.port)
-            cip_name = self.cipher.__class__.__name__
-            self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port} using cipher {cip_name}")
+            self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port} using {len(self.ciphers)} ciphers")
             async with self.asyncio_server:
                 await self.asyncio_server.serve_forever()
         except KeyboardInterrupt:
@@ -107,12 +107,14 @@ class Socks5Server:
                 return
         user = await self.add_user(client_ip, client_port, writer)
         logging.debug(f'{user} is connecting...')
-        cipher = self.cipher.copy()
+        cipher = self.ciphers[0].copy()
 
         try:
             if await cipher.server_hello(self, reader, writer):
-                self.logger.debug(f"Sent server_hello")
+                self.logger.debug(f"Sent server_hello of {cipher.__class__.__name__}")
                 try:
+                    cipher = await cipher.server_get_cipher(self, self.ciphers, reader, writer)
+                    self.logger.debug(f"Client choosed a cipher {cipher.__class__.__name__}")
                     await self.handshake(reader, writer, cipher, user=user)
                 except ConnectionError as e:
                     self.logger.error(f'Suspicious client tried to connect: {user} => {e}')
@@ -130,8 +132,8 @@ class Socks5Server:
             else:
                 self.logger.warning(f'Suspicious client tried to connect: {user}')
 
-        except Exception as e:
-            self.logger.error(f"Connection error: {e}")
+        # except Exception as e:
+        #     self.logger.error(f"Connection error: {e}")
 
         finally:
             await user.disconnect()
@@ -214,8 +216,7 @@ class Socks5Server:
 
     async def __aenter__(self):
         self.asyncio_server = await asyncio.start_server(self.handle_client, self.host, self.port)
-        cip_name = self.cipher.__class__.__name__
-        self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port} using cipher {cip_name}")
+        self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port} using {len(self.ciphers)} ciphers")
         return self
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
