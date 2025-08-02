@@ -94,6 +94,27 @@ class Cipher:
     def copy(self) -> 'Cipher':
         return self.__class__(*self._init_args, **self._init_kwargs)
 
+    async def client_send_cipher(self, client: 'Socks5Client', cipher_index: int, reader: asyncio.StreamReader,
+                           writer: asyncio.StreamWriter) -> bool:
+        writer.write(cipher_index.to_bytes(1, 'big'))
+        await writer.drain()
+        response = (await reader.readexactly(1))[0]
+        return response == 0
+
+    async def server_get_cipher(self, server: 'Socks5Server', ciphers: List['Cipher'], reader: asyncio.StreamReader,
+                           writer: asyncio.StreamWriter) -> Optional['Cipher']:
+        index = (await reader.readexactly(1))[0]
+        try:
+            cipher = ciphers[index]
+        except IndexError:
+            writer.write(b'\x01')
+            await writer.drain()
+            raise ConnectionError(f'Invalid cipher index received {index}')
+
+        writer.write(b'\x00')
+        await writer.drain()
+        return cipher.copy()
+
     async def client_send_methods(self, socks_version: int, methods: List[int]) -> List[bytes]:
         return [bytes([
             socks_version,

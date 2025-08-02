@@ -11,18 +11,21 @@ from .proxy_server import Socks5Server, ConnectionMethods, UDPServerProxy
 
 
 class Socks5Client:
-    def __init__(self, cipher: Optional[Cipher] = None, udp_cipher: Optional[Cipher] = None,  log_bytes: bool = False):
+    def __init__(self, ciphers: List[Cipher] = [Cipher()], cipher_index: int = 0,
+                 udp_cipher: Optional[Cipher] = None,  log_bytes: bool = False):
         self.socks_version = 5
         self.log_bytes = log_bytes # only after handshake
-        self.cipher = Cipher() if cipher is None else cipher
+        self.ciphers = ciphers
+        self.cipher_index = cipher_index
         self.udp_cipher = Cipher() if udp_cipher is None else udp_cipher
         self.udp_socket = None
         self.bytes_sent = 0
         self.bytes_received = 0
         self.logger = logging.getLogger(__name__)
 
-        self.cipher.is_client = True
-        self.cipher.is_client = True
+        for cipher in self.ciphers:
+            cipher.is_client = True
+        self.udp_cipher.is_client = True
 
         self.user_commands = {
             'connect': 0x01,
@@ -34,15 +37,23 @@ class Socks5Client:
     async def handshake(self, proxy_host: str = '127.0.0.1', proxy_port: int = 1080, username: Optional[str] = None,
                         password: Optional[str] = None) -> 'TCP_ProxySession':
         reader, writer = await asyncio.open_connection(proxy_host, proxy_port)
-        cipher = self.cipher.copy()
+        try:
+            cipher = self.ciphers[self.cipher_index].copy()
+        except IndexError:
+            raise IndexError(f'Invalid cipher index choosed: {self.cipher_index} of list {self.ciphers}')
         session = TCP_ProxySession(self, reader, writer, cipher, proxy_host, proxy_port,
                                    username=username, password=password, log_bytes=self.log_bytes)
         self.sessions.append(session)
         self.logger.info(
-            f"Connected to SOCKS5 proxy at {proxy_host}:{proxy_port} using cipher {self.cipher.__class__.__name__}"
+            f"Connected to SOCKS5 proxy at {proxy_host}:{proxy_port} using {self.ciphers[0].__class__.__name__}"
         )
-        await session.cipher.client_hello(self, reader, writer)
+        default_cipher = self.ciphers[0].copy()
+        await default_cipher.client_hello(self, reader, writer)
         self.logger.debug("Sent client_hello")
+        if await default_cipher.client_send_cipher(self, self.cipher_index, reader, writer):
+            self.logger.debug("Sent a cipher to the server")
+        else:
+            raise ConnectionError(f"Server has denied choosed cipher {self.cipher_index}")
 
         methods = [0x00]
         if username and password:
@@ -132,7 +143,7 @@ class Socks5Client:
         await self.close()
 
     def __str__(self):
-        return f'{self.__class__.__name__}({len(self.sessions)} connections, cipher={self.cipher.__class__.__name__})'
+        return f'{self.__class__.__name__}({len(self.sessions)} connections, cipher={self.ciphers[0].__class__.__name__})'
 
 class TCP_ProxySession:
     def __init__(self, client: Socks5Client, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
@@ -443,7 +454,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
             self._local_host = self.local_server.host
             self._local_host = self.local_server.port
 
-            await self.local_server.async_start()
+            await self.local_server.start()
         except KeyboardInterrupt:
             self.logger.info('Client closed')
 
@@ -456,7 +467,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
             self.logger.info('Server closed')
 
     async def handle_local_client(self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter):
-        default_cipher = self.local_server.cipher.copy()
+        default_cipher = self.local_server.ciphers[0].copy()
 
         # Connecting to the local proxy, getting a command
         self.logger.debug('Local client connecting...')
