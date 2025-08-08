@@ -1,5 +1,4 @@
 import json
-import hashlib
 import logging
 import os
 from pathlib import Path
@@ -34,16 +33,15 @@ file_handler.setFormatter(formatter)
 config = json.load(open(config_file, 'r', encoding='utf-8'))
 
 key = b'\x86P\x0e\xd3\xd4\xf2\xbc\x19\x1f\x98\xc5\xd0e\xf3X\x07\xf7\xd5R_\x9b\x1c\x92R\xe0}JY\x94\x01nF'
-hash_key = hashlib.sha256(key).digest()
 available_ciphers = [
     Cipher(wrapper=HTTP_WS_Wrapper()), # starts a handshake with client_hello and server_hello from wrapper
-    AES_CBC(key=hash_key, iv=os.urandom(16)),
-    AES_CTR(key=hash_key, iv=os.urandom(16)),
+    AES_CBC(key=key, iv=os.urandom(16)),
+    AES_CTR(key=key, iv=os.urandom(16)),
     ChaCha20_Poly1305(key=key),
 ]
 CLIENT = Socks5_TCP_Retranslator(
     config['remote_proxy_host'], int(config['remote_proxy_port']),
-    cipher_index=3,
+    cipher_index=2,
     ciphers=available_ciphers,
     udp_cipher=available_ciphers[2],
     username=config['username'],

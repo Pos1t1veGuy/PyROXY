@@ -148,8 +148,8 @@ class Cipher:
 
         return response[1]
 
-    async def server_auth_userpass(self, logins: Dict[str, str], reader: asyncio.StreamReader,
-                            writer: asyncio.StreamWriter) -> Optional[Tuple[str, str]]:
+    async def server_auth_userpass(self, db_handler: 'Handler', reader: asyncio.StreamReader,
+                            writer: asyncio.StreamWriter) -> Optional[Tuple[str, str, str]]:
         auth_version = (await reader.readexactly(1))[0]
 
         if auth_version == 1:
@@ -158,11 +158,12 @@ class Cipher:
 
             pw_length = (await reader.readexactly(1))[0]
             pw = (await reader.readexactly(pw_length)).decode()
+            db_pw, db_key = db_handler.get_user(username)
 
-            if logins.get(username) == pw:
+            if db_pw == pw:
                 writer.write(bytes([1, 0]))
                 await writer.drain()
-                return username, pw
+                return username, pw, db_key
             else:
                 writer.write(bytes([1, 1]))
                 await writer.drain()

@@ -19,7 +19,7 @@ from ..base_cipher import Cipher, REPLYES
 class AES_CTR(Cipher):
     def __init__(self, key: bytes, iv: Optional[bytes] = None, iv_length: int = 16, **kwargs):
         super().__init__(key, iv=iv, **kwargs)
-        self.key = key
+        self.key = hashlib.sha256(key).digest()
         self.iv = iv
         self.iv_length = iv_length
         self.encryptor = None
@@ -224,7 +224,7 @@ class AES_CTR(Cipher):
 class AES_CBC(Cipher):
     def __init__(self, key: bytes, iv: Optional[bytes] = None, iv_length: int = 16, **kwargs):
         super().__init__(key, iv=iv, **kwargs)
-        self.key = key
+        self.key = hashlib.sha256(key).digest()
         self.iv = iv
         self.iv_length = iv_length
         self.encryptor = None
@@ -533,7 +533,7 @@ class ChaCha20_Poly1305(Cipher):
 
         return method
 
-    async def server_auth_userpass(self, logins: Dict[str, str], reader: asyncio.StreamReader,
+    async def server_auth_userpass(self, db_handler: 'Handler', reader: asyncio.StreamReader,
                                    writer: asyncio.StreamWriter) -> Optional[Tuple[str, str]]:
         encrypted_header = await reader.readexactly(2 + self.overhead_length)
         auth_version, ulen = struct.unpack("!BB", b''.join(self.decrypt(encrypted_header)))
@@ -547,10 +547,12 @@ class ChaCha20_Poly1305(Cipher):
         password = await reader.readexactly(plen + self.overhead_length)
         password = b''.join(self.decrypt(password)).decode()
 
-        if logins.get(username) == password:
+        db_pw, db_key = db_handler.get_user(username)
+
+        if db_pw == password:
             writer.write(b''.join(self.encrypt(struct.pack("!BB", 1, 0))))
             await writer.drain()
-            return username, password
+            return username, password, db_key
         else:
             writer.write(b''.join(self.encrypt(struct.pack("!BB", 1, 1))))
             await writer.drain()
