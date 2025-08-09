@@ -60,32 +60,32 @@ class Socks5Server:
             self.logger.info("Server is closed")
 
 
-    async def handshake(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, cipher: 'Cipher',
-                        user: Optional['User'] = None) -> 'User':
+    async def handshake(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                        cipher: 'Cipher', default_cipher: 'Cipher', user: Optional['User'] = None) -> 'User':
         if user is None:
             client_ip, client_port = writer.get_extra_info("peername")
             user = await self.add_user(client_ip, client_port, writer)
 
         self.logger.debug('The server getting an auth methods')
-        methods = await cipher.server_get_methods(self.socks_version, reader)
+        methods = await default_cipher.server_get_methods(self.socks_version, reader)
 
         if methods['supports_no_auth'] and self.accept_anonymous:
             self.logger.debug(f'{user} authorizing as Anonynous')
-            data = await cipher.server_send_method_to_user(self.socks_version, 0x00)
+            data = await default_cipher.server_send_method_to_user(self.socks_version, 0x00)
             await self.send(user, data, log_bytes=False)
         elif methods['supports_user_pass']:
             self.logger.debug(f'{user} authorizing with username:password')
-            data = await cipher.server_send_method_to_user(self.socks_version, 0x02)
+            data = await default_cipher.server_send_method_to_user(self.socks_version, 0x02)
             await self.send(user, data, log_bytes=False)
 
             self.logger.debug('The server is authorizing the client')
-            auth_data = await cipher.server_auth_userpass(self.users_auth_data, reader, writer)
+            auth_data = await default_cipher.server_auth_userpass(self.users_auth_data, reader, writer)
             if not auth_data:
                 raise ConnectionError(f"Wrong authentication data {user}")
 
             user.username, user.password = auth_data
         else:
-            data = await cipher.server_send_method_to_user(self.socks_version, 0xFF)
+            data = await default_cipher.server_send_method_to_user(self.socks_version, 0xFF)
             await self.send(user, data, log_bytes=False)
             ms = ", ".join([m for m, enabled in methods.items() if enabled])
             raise ConnectionError(f'Can not use authentication method {user} - {ms}')
@@ -93,7 +93,7 @@ class Socks5Server:
         user.handshaked = True
         cipher.is_handshaked = True
         self.logger.debug(f'{user} is handshaked')
-        return user
+        return user, cipher
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         client_ip, client_port = writer.get_extra_info("peername")
@@ -107,15 +107,15 @@ class Socks5Server:
                 return
         user = await self.add_user(client_ip, client_port, writer)
         logging.debug(f'{user} is connecting...')
-        cipher = self.ciphers[0].copy()
+        default_cipher = self.ciphers[0].copy()
 
         try:
-            if await cipher.server_hello(self, reader, writer):
-                self.logger.debug(f"Sent server_hello of {cipher.__class__.__name__}")
+            if await default_cipher.server_hello(self, reader, writer):
+                self.logger.debug(f"Sent server_hello of {default_cipher.wrapper.__class__.__name__}")
                 try:
-                    cipher = await cipher.server_get_cipher(self, self.ciphers, reader, writer)
+                    cipher = await default_cipher.server_get_cipher(self, self.ciphers, reader, writer)
                     self.logger.debug(f"Client choosed a cipher {cipher.__class__.__name__}")
-                    await self.handshake(reader, writer, cipher, user=user)
+                    user, cipher = await self.handshake(reader, writer, cipher, default_cipher, user=user)
                 except ConnectionError as e:
                     self.logger.error(f'Suspicious client tried to connect: {user} => {e}')
                     return
@@ -132,8 +132,8 @@ class Socks5Server:
             else:
                 self.logger.warning(f'Suspicious client tried to connect: {user}')
 
-        # except Exception as e:
-        #     self.logger.error(f"Connection error: {e}")
+        except Exception as e:
+            self.logger.error(f"Connection error: {e}")
 
         finally:
             await user.disconnect()

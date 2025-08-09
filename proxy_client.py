@@ -39,15 +39,15 @@ class Socks5Client:
         reader, writer = await asyncio.open_connection(proxy_host, proxy_port)
         try:
             cipher = self.ciphers[self.cipher_index].copy()
+            default_cipher = self.ciphers[0].copy()
         except IndexError:
             raise IndexError(f'Invalid cipher index choosed: {self.cipher_index} of list {self.ciphers}')
         session = TCP_ProxySession(self, reader, writer, cipher, proxy_host, proxy_port,
                                    username=username, password=password, log_bytes=self.log_bytes)
         self.sessions.append(session)
         self.logger.info(
-            f"Connected to SOCKS5 proxy at {proxy_host}:{proxy_port} using {self.ciphers[0].__class__.__name__}"
+            f"Connected to SOCKS5 proxy at {proxy_host}:{proxy_port} using {self.ciphers[self.cipher_index].__class__.__name__}"
         )
-        default_cipher = self.ciphers[0].copy()
         await default_cipher.client_hello(self, reader, writer)
         self.logger.debug("Sent client_hello")
         if await default_cipher.client_send_cipher(self, self.cipher_index, reader, writer):
@@ -60,10 +60,10 @@ class Socks5Client:
             methods.insert(0, 0x02)
 
         self.logger.debug("Sent auth methods")
-        methods_msg = await session.cipher.client_send_methods(self.socks_version, methods)
+        methods_msg = await default_cipher.client_send_methods(self.socks_version, methods)
         await session.asend(methods_msg, encrypt=False, log_bytes=False)
         self.logger.debug("Receiving server auth method")
-        method_chosen = await session.cipher.client_get_method(self.socks_version, reader)
+        method_chosen = await default_cipher.client_get_method(self.socks_version, reader)
 
         try:
             if method_chosen == 0xFF:
@@ -74,7 +74,7 @@ class Socks5Client:
                     raise ConnectionError("Proxy requires username/password authentication, but none provided")
 
                 self.logger.debug("Client is authorizing")
-                auth_ok = await session.cipher.client_auth_userpass(username, password, reader, writer)
+                auth_ok = await default_cipher.client_auth_userpass(username, password, reader, writer)
                 if not auth_ok:
                     raise ConnectionError("Authentication failed")
                 self.logger.info("Authenticated successfully")
@@ -472,7 +472,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
         # Connecting to the local proxy, getting a command
         self.logger.debug('Local client connecting...')
         try:
-            user = await self.local_server.handshake(client_reader, client_writer, default_cipher)
+            user, default_cipher = await self.local_server.handshake(client_reader, client_writer, default_cipher, default_cipher)
         except Exception as e:
             self.logger.error(
                 f"Can not do handshake to local proxy {self.local_server.host}:{self.local_server.port} — {e}"
@@ -509,7 +509,11 @@ class Socks5_TCP_Retranslator(Socks5Client):
                 self.socks_version, self.user_commands['connect'], addr, port
             )
             await remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False)
-            address, port = await remote_session.cipher.client_connect_confirm(remote_session.reader)
+            try:
+                address, port = await remote_session.cipher.client_connect_confirm(remote_session.reader)
+            except ConnectionError as e:
+                self.logger.error(e)
+                return
 
             self.logger.debug(f"Establishing TCP connection to {addr}:{port}...")
 

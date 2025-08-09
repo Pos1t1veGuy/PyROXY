@@ -19,7 +19,7 @@ from ..base_cipher import Cipher, REPLYES
 class AES_CTR(Cipher):
     def __init__(self, key: bytes, iv: Optional[bytes] = None, iv_length: int = 16, **kwargs):
         super().__init__(key, iv=iv, **kwargs)
-        self.key = key
+        self.key = hashlib.sha256(key).digest()
         self.iv = iv
         self.iv_length = iv_length
         self.encryptor = None
@@ -224,7 +224,7 @@ class AES_CTR(Cipher):
 class AES_CBC(Cipher):
     def __init__(self, key: bytes, iv: Optional[bytes] = None, iv_length: int = 16, **kwargs):
         super().__init__(key, iv=iv, **kwargs)
-        self.key = key
+        self.key = hashlib.sha256(key).digest()
         self.iv = iv
         self.iv_length = iv_length
         self.encryptor = None
