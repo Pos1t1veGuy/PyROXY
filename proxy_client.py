@@ -403,7 +403,7 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
         return f'{self.__class__.__name__}(host="{self.host}", port={self.port})'
 
 
-class Socks5_UDP_Retranslator(UDPServerProxy):
+class Socks5_UDP_Retranslator(UDP_ProxySession):
     def __init__(self, remote_host: str, remote_port: int, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.remote_host = remote_host
@@ -549,21 +549,22 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
         elif command == ConnectionMethods.UDP_ASSOCIATE:
             self.logger.debug("Starting UDP server...")
-            cmd_bytes = await remote_cipher.client_command(
+            cmd_bytes = await remote_session.cipher.client_command(
                 self.socks_version, self.user_commands['associate'], addr, port
             )
             await remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False)
-            address, port = await remote_session.cipher.client_connect_confirm(reader)
+            address, port = await remote_session.cipher.client_connect_confirm(remote_session.reader)
 
             self.logger.debug(f"Establishing UDP connection to {address}:{port}...")
             loop = asyncio.get_running_loop()
 
             try:
-                udp_session = Socks5_UDP_Retranslator.create(remote_session.cipher)
+                udp_session = await Socks5_UDP_Retranslator.create(address, port, remote_session.cipher)
             except Exception as e:
                 self.logger.error(f"Failed to start UDP relay: {e}")
-                reply = await cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0)
-                client_writer.write(reply)
+                reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0)
+                for r in reply:
+                    client_writer.write(r)
                 await client_writer.drain()
                 return 1
 
@@ -573,7 +574,8 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
             try:
                 reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['succeeded'], udp_host, udp_port)
-                client_writer.write(reply)
+                for r in reply:
+                    client_writer.write(r)
                 await client_writer.drain()
             except Exception as e:
                 self.logger.warning(f"Failed to make UDP connection at TCP {addr}:{port}; UDP {udp_host}:{udp_port} => {e}")
@@ -611,4 +613,4 @@ class Socks5_TCP_Retranslator(Socks5Client):
                 self.socks_version, self.user_commands['bind'], addr, port
             )
             await remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False)
-            address, port = await remote_session.cipher.client_connect_confirm(reader)
+            address, port = await remote_session.cipher.client_connect_confirm(remote_session.reader)
