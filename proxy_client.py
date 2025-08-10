@@ -361,10 +361,10 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
         self.recv_queue.put_nowait((data, addr))
 
     def error_received(self, exc):
-        raise ConnectionError(f"{self} error: {exc}")
+        pass # raise ConnectionError(f"{self} error: {exc}")
 
     def connection_lost(self, exc):
-        raise ConnectionError(f"{self} connection with {self.client_ip}:{self.client_port} closed")
+        pass # raise ConnectionError(f"{self} connection with {self.client_ip}:{self.client_port} closed")
 
     def raw_send(self, data: bytes):
         if self.transport is not None:

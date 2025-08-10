@@ -1,0 +1,22 @@
+tunnel:
+  # Interface name
+  name: tun0
+  # Interface MTU
+  mtu: 8500
+  # Multi-queue
+  multi-queue: false
+  # IPv4 address
+  ipv4: 198.18.0.1
+  # IPv6 address
+  ipv6: 'fc00::1'
+
+socks5:
+  # Socks5 server port
+  port: 1080
+  # Socks5 server address (ipv4/ipv6)
+  address: 127.0.0.1
+  # Socks5 UDP relay mode (tcp|udp)
+  udp: 'udp'
+
+misc:
+  log-level: info

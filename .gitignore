@@ -5,3 +5,5 @@ client.log
 logs
 *.sqlite3
 .pyroxy
+dist
+build
