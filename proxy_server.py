@@ -38,7 +38,7 @@ class Socks5Server:
         self.log_bytes = log_bytes # only after handshake
         self.udp_server_timeout = udp_server_timeout
         self.ciphers = ciphers
-        self.db_handler = db_handler if db_handler else SQLite_Handler()
+        self.db_handler = db_handler
         self.udp_cipher = Cipher() if udp_cipher is None else udp_cipher
         self.logger = logging.getLogger(__name__)
 

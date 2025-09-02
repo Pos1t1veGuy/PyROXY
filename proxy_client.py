@@ -460,6 +460,8 @@ class Socks5_TCP_Retranslator(Socks5Client):
             await self.local_server.start()
         except KeyboardInterrupt:
             self.logger.info('Client closed by user')
+        except RuntimeError:
+            self.logger.info('Client closed by user')
 
     def listen_and_forward(self, *args, **kwargs):
         try:
