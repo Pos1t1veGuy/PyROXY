@@ -1,6 +1,6 @@
 import sys, subprocess
 
-modules = ['ciphers', 'wrappers']
+modules = ['ciphers', 'wrappers', 'tunnel']
 
 for name in modules:
     path = f"./{name}/requirements.txt"

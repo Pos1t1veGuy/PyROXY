@@ -6,7 +6,7 @@ try:
         target = 'python client.py'
 
     if os.path.isfile('profile.pyroxy'):
-        print('running with profile config...')
+        print('[+] running with profile config...')
         parameters = ' --'.join(open('profile.pyroxy', 'r').read().split('\n'))
         os.system(f'{target} --{parameters}')
     else:

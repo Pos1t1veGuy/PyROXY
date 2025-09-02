@@ -25,10 +25,12 @@ class Socks5Server:
                  db_handler: Optional['Handler'] = None,
                  user_commands: Optional[Dict[bytes, callable]] = None,
                  accept_anonymous: bool = False,
-                 log_bytes: bool = True):
+                 log_bytes: bool = True,
+                 address_changing: bool = True):
 
         self.socks_version = 5
         self.accept_anonymous = accept_anonymous
+        self.address_changing = address_changing
         self.host = host
         self.port = port
         self.user_white_list = user_white_list
@@ -53,8 +55,28 @@ class Socks5Server:
 
     async def start(self):
         try:
-            self.asyncio_server = await asyncio.start_server(self.handle_client, self.host, self.port)
-            self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port} using {len(self.ciphers)} ciphers")
+            start_port = self.port
+            iters = 0
+            while 1:
+                iters += 1
+                try:
+                    self.asyncio_server = await asyncio.start_server(self.handle_client, self.host, self.port)
+                    break
+                except OSError as ex:
+                    if self.address_changing:
+                        self.port += 1
+                        if self.port > 25565:
+                            self.port = 0
+                    else:
+                        self.logger.error(f'Can not find port to bind, {self.port} is already used')
+                        raise ex
+
+                if iters >= 10_000:
+                    self.logger.error(f'Can not find port to bind, {start_port} is already used')
+                    raise
+
+            ciphers = f'{len(self.ciphers)} ciphers' if len(self.ciphers) > 1 else self.ciphers[0].__class__.__name__
+            self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port} using {ciphers}")
             async with self.asyncio_server:
                 await self.asyncio_server.serve_forever()
         except KeyboardInterrupt:
@@ -219,7 +241,8 @@ class Socks5Server:
 
     async def __aenter__(self):
         self.asyncio_server = await asyncio.start_server(self.handle_client, self.host, self.port)
-        self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port} using {len(self.ciphers)} ciphers")
+        ciphers = f'{len(self.ciphers)} ciphers' if len(self.ciphers) > 1 else self.ciphers[0].__class__.__name__
+        self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port} using {ciphers}")
         return self
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
@@ -460,7 +483,7 @@ class ConnectionMethods:
         try:
             await asyncio.gather(
                 server.pipe(client_reader, remote_writer, stop_event, decrypt=cipher.decrypt, name='client -> server'),
-                server.pipe(remote_reader, client_writer, stop_event, encrypt=cipher.encrypt, name='client <- servers'),
+                server.pipe(remote_reader, client_writer, stop_event, encrypt=cipher.encrypt, name='client <- server'),
             )
         except (ConnectionResetError, OSError):
             pass
