@@ -1,12 +1,22 @@
 # -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
+import site
 
+site_packages = Path(site.getsitepackages()[1])
+lib = Path(site.getsitepackages()[0]) / 'Lib'
 
 a = Analysis(
-    ['profile_starter.py'],
+    ['client.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=['mylib.module1'],
+    binaries=[
+        (str(lib / 'pyroxy' / 'tunnel' / 'tun2socks.exe'), '.'),
+        (str(lib / 'pyroxy' / 'tunnel' / 'wintun.dll'), '.'),
+    ],
+    datas=[
+        (str(site_packages / 'fake_useragent' / 'data' / '*'), 'fake_useragent/data'),
+        (str(lib / 'pyroxy' / 'wrappers' / '*'), 'pyroxy/wrappers'),
+    ],
+    hiddenimports=['pyroxy'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -22,7 +32,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='profile_starter',
+    name='client',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -1,20 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-from pathlib import Path
-import site
 
-site_packages = Path(site.getsitepackages()[1])
-Lib = site_packages.parent
-print(123, str(site_packages / 'fake_useragent' / 'data' / '*'))
 
 a = Analysis(
-    ['client.py'],
+    ['profile_starter.py'],
     pathex=[],
     binaries=[],
-    datas=[
-        (str(site_packages / 'fake_useragent' / 'data' / '*'), 'fake_useragent/data'),
-        (str(Lib / 'pyroxy' / 'wrappers' / '*'), 'pyroxy/wrappers'),
-    ],
-    hiddenimports=['pyroxy'],
+    datas=[],
+    hiddenimports=['mylib.module1'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -30,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='client',
+    name='STARTER',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

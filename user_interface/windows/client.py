@@ -59,6 +59,11 @@ def main():
     parser.add_argument("--wrapper", choices=["none", "httpws"], default="httpws",
                         help="PyROXY server wrapper (proxy server disguise mode, by default httpws)")
 
+    parser.add_argument("--tun2socks_path", default=Path(__file__).parent / "tun2socks.exe",
+                        help="Path to tun2socks.exe tunnel interface (wintun.dll there required)")
+    parser.add_argument("--wintun_path", default=Path(__file__).parent / "wintun.dll",
+                        help="Path to wintun.dll tunnel driver (tun2socks.exe there required)")
+
     parser.add_argument(
         "--auto_forward_traffic",
         type=int,
@@ -69,27 +74,29 @@ def main():
 
     args = parser.parse_args()
 
-    tunnel = Tun2Socks(args.host, silent=not bool(args.tunnel_debug))
-    if tunnel.tun_started():
-        print('[e] Pyroxy already started')
-        exit()
+    tunnel = Tun2Socks(args.host, path_to_exe=args.tun2socks_path, path_to_wintun=args.wintun_path,
+                       silent=not bool(args.tunnel_debug))
 
     if args.auto_forward_traffic == 1:
+        if tunnel.tun_started():
+            print('[e] Pyroxy already started')
+            sys.exit(1)
+
         print('[+] auto forward enabled')
         tunnel.start(args.local_host, args.local_port)
 
     if args.key == '.':
         print('[e] You need to put your KEY into starter.bat arguments "--key=..."')
-        exit()
+        sys.exit(1)
     elif args.username == '.':
         print('[e] You need to put your USERNAME into starter.bat arguments "--username=..."')
-        exit()
+        sys.exit(1)
     elif args.password == '.':
         print('[e] You need to put your PASSWORD into starter.bat arguments "--password=..."')
-        exit()
+        sys.exit(1)
     elif args.host == '.':
         print('[e] You need to put server HOST into starter.bat arguments "--host=..."')
-        exit()
+        sys.exit(1)
 
     '''
     You can't mix up this order "available_ciphers" of ciphers, otherwise the server and client will mix up their

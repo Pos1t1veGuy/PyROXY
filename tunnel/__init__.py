@@ -1,6 +1,6 @@
 from typing import *
 import subprocess
-import os
+import os, sys
 import signal
 import time
 import re
@@ -119,6 +119,14 @@ class Tun2Socks:
             text=True
         )
 
+        subprocess.run(
+            f'netsh interface ipv4 set interface "{self.tun_name}" metric=1',
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True
+        )
+
         gws = netifaces.gateways()
         default_gateway = gws.get('default', {}).get(netifaces.AF_INET)
         if default_gateway:
@@ -134,17 +142,17 @@ class Tun2Socks:
                 )
             else:
                 print(f'[e] can not find LAN gateway id by IP {self.gateway_ip}')
-                exit()
+                sys.exit(1)
         else:
             print('[e] can not find LAN gateway IP')
-            exit()
+            sys.exit(1)
 
         interfaces = self.get_interfaces()
         try:
             iface_id = interfaces[self.tun_name]["idx"]
         except KeyError:
             print(f'[e] tun2socks "{self.tun_name}" interface not found')
-            exit()
+            sys.exit(1)
 
         subprocess.run(
             f'route add 0.0.0.0 mask 0.0.0.0 {self.interface_ip} metric 1 if {iface_id}',
