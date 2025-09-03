@@ -11,12 +11,14 @@ from .proxy_server import Socks5Server, ConnectionMethods, UDPServerProxy
 
 
 class Socks5Client:
-    def __init__(self, ciphers: List[Cipher] = [Cipher()], cipher_index: int = 0,
-                 udp_cipher: Optional[Cipher] = None,  log_bytes: bool = False):
+    def __init__(self, ciphers: List[Cipher] = [Cipher()], cipher_key: bytes = '', cipher_index: int = 0,
+                 udp_cipher: Optional[Cipher] = None, log_bytes: bool = False, default_socks5: bool = False):
         self.socks_version = 5
         self.log_bytes = log_bytes # only after handshake
+        self.default_socks5 = default_socks5
         self.ciphers = ciphers
         self.cipher_index = cipher_index
+        self.cipher_key = cipher_key
         self.udp_cipher = Cipher() if udp_cipher is None else udp_cipher
         self.udp_socket = None
         self.bytes_sent = 0
@@ -38,7 +40,7 @@ class Socks5Client:
                         password: Optional[str] = None) -> 'TCP_ProxySession':
         reader, writer = await asyncio.open_connection(proxy_host, proxy_port)
         try:
-            cipher = self.ciphers[self.cipher_index].copy()
+            cipher = self.ciphers[self.cipher_index].__class__(self.cipher_key)
             default_cipher = self.ciphers[0].copy()
         except IndexError:
             raise IndexError(f'Invalid cipher index choosed: {self.cipher_index} of list {self.ciphers}')
@@ -50,10 +52,11 @@ class Socks5Client:
         )
         await default_cipher.client_hello(self, reader, writer)
         self.logger.debug("Sent client_hello")
-        if await default_cipher.client_send_cipher(self, self.cipher_index, reader, writer):
-            self.logger.debug("Sent a cipher to the server")
-        else:
-            raise ConnectionError(f"Server has denied choosed cipher {self.cipher_index}")
+        if not self.default_socks5:
+            if await default_cipher.client_send_cipher(self, self.cipher_index, reader, writer):
+                self.logger.debug("Sent a cipher to the server")
+            else:
+                raise ConnectionError(f"Server has denied choosed cipher {self.cipher_index}")
 
         methods = [0x00]
         if username and password:
@@ -360,10 +363,10 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
         self.recv_queue.put_nowait((data, addr))
 
     def error_received(self, exc):
-        raise ConnectionError(f"{self} error: {exc}")
+        pass # raise ConnectionError(f"{self} error: {exc}")
 
     def connection_lost(self, exc):
-        raise ConnectionError(f"{self} connection with {self.client_ip}:{self.client_port} closed")
+        pass # raise ConnectionError(f"{self} connection with {self.client_ip}:{self.client_port} closed")
 
     def raw_send(self, data: bytes):
         if self.transport is not None:
@@ -402,7 +405,7 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
         return f'{self.__class__.__name__}(host="{self.host}", port={self.port})'
 
 
-class Socks5_UDP_Retranslator(UDPServerProxy):
+class Socks5_UDP_Retranslator(UDP_ProxySession):
     def __init__(self, remote_host: str, remote_port: int, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.remote_host = remote_host
@@ -447,7 +450,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
     async def async_listen_and_forward(self, local_host: str = '127.0.0.1', local_port: int = 1080,
                                        log_bytes: bool = False):
         try:
-            self.local_server = Socks5Server(host=local_host, port=local_port, accept_anonymous=True, users={'u':'pw'})
+            self.local_server = Socks5Server(host=local_host, port=local_port, accept_anonymous=True)
             self.local_server.handle_client = self.handle_local_client
             self.logger.info(f"Retranslator started at {local_host}:{local_port} for {self.remote_host}:{self.remote_port}")
 
@@ -456,15 +459,17 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
             await self.local_server.start()
         except KeyboardInterrupt:
-            self.logger.info('Client closed')
+            self.logger.info('Client closed by user')
+        except RuntimeError:
+            self.logger.info('Client closed by user')
 
     def listen_and_forward(self, *args, **kwargs):
         try:
             asyncio.run(self.async_listen_and_forward(*args, **kwargs))
         except KeyboardInterrupt:
-            self.logger.info('Client closed')
-        except (ConnectionResetError, OSError):
-            self.logger.info('Server closed')
+            self.logger.info('Client closed by user')
+        except (ConnectionResetError, OSError) as ex:
+            self.logger.info(f'Server closed {ex}')
 
     async def handle_local_client(self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter):
         default_cipher = self.local_server.ciphers[0].copy()
@@ -498,8 +503,11 @@ class Socks5_TCP_Retranslator(Socks5Client):
             return
         except Exception as e:
             self.logger.error(f"Can not do handshake to remote proxy {self.remote_host}:{self.remote_port} — {e}")
-            client_writer.close()
-            await client_writer.wait_closed()
+            try:
+                client_writer.close()
+                await client_writer.wait_closed()
+            except:
+                pass
             return
         self.logger.debug(f'Client {user} handshaked with remote server')
 
@@ -529,8 +537,11 @@ class Socks5_TCP_Retranslator(Socks5Client):
                 reply_frames = await default_cipher.server_make_reply(
                     self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0
                 )
-                client_writer.write(b''.join(reply_frames))
-                await client_writer.drain()
+                try:
+                    client_writer.write(b''.join(reply_frames))
+                    await client_writer.drain()
+                except:
+                    pass
                 return
 
             stop_event = asyncio.Event()
@@ -548,21 +559,22 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
         elif command == ConnectionMethods.UDP_ASSOCIATE:
             self.logger.debug("Starting UDP server...")
-            cmd_bytes = await remote_cipher.client_command(
+            cmd_bytes = await remote_session.cipher.client_command(
                 self.socks_version, self.user_commands['associate'], addr, port
             )
             await remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False)
-            address, port = await remote_session.cipher.client_connect_confirm(reader)
+            address, port = await remote_session.cipher.client_connect_confirm(remote_session.reader)
 
             self.logger.debug(f"Establishing UDP connection to {address}:{port}...")
             loop = asyncio.get_running_loop()
 
             try:
-                udp_session = Socks5_UDP_Retranslator.create(remote_session.cipher)
+                udp_session = await Socks5_UDP_Retranslator.create(address, port, remote_session.cipher)
             except Exception as e:
                 self.logger.error(f"Failed to start UDP relay: {e}")
-                reply = await cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0)
-                client_writer.write(reply)
+                reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0)
+                for r in reply:
+                    client_writer.write(r)
                 await client_writer.drain()
                 return 1
 
@@ -572,12 +584,16 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
             try:
                 reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['succeeded'], udp_host, udp_port)
-                client_writer.write(reply)
+                for r in reply:
+                    client_writer.write(r)
                 await client_writer.drain()
             except Exception as e:
                 self.logger.warning(f"Failed to make UDP connection at TCP {addr}:{port}; UDP {udp_host}:{udp_port} => {e}")
-                client_writer.write(await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0))
-                await client_writer.drain()
+                try:
+                    client_writer.write(await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0))
+                    await client_writer.drain()
+                except:
+                    pass
                 return
 
             try:
@@ -610,4 +626,4 @@ class Socks5_TCP_Retranslator(Socks5Client):
                 self.socks_version, self.user_commands['bind'], addr, port
             )
             await remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False)
-            address, port = await remote_session.cipher.client_connect_confirm(reader)
+            address, port = await remote_session.cipher.client_connect_confirm(remote_session.reader)

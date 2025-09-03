@@ -8,6 +8,7 @@ import time
 
 from .logger_setup import *
 from .base_cipher import Cipher, REPLYES_CODES
+from .db_handlers import SQLite_Handler
 
 
 MAX_PAYLOAD_UDP = 65535
@@ -21,14 +22,15 @@ class Socks5Server:
                  ciphers: List[Cipher] = [Cipher()],
                  udp_cipher: Optional[Cipher] = None,
                  udp_server_timeout: int = 5*60,
-                 users: Optional[Dict[str, str]] = None,
+                 db_handler: Optional['Handler'] = None,
                  user_commands: Optional[Dict[bytes, callable]] = None,
                  accept_anonymous: bool = False,
-                 log_bytes: bool = True):
+                 log_bytes: bool = True,
+                 address_changing: bool = True):
 
         self.socks_version = 5
         self.accept_anonymous = accept_anonymous
-        self.users_auth_data = users if not users is None else {}
+        self.address_changing = address_changing
         self.host = host
         self.port = port
         self.user_white_list = user_white_list
@@ -36,6 +38,7 @@ class Socks5Server:
         self.log_bytes = log_bytes # only after handshake
         self.udp_server_timeout = udp_server_timeout
         self.ciphers = ciphers
+        self.db_handler = db_handler
         self.udp_cipher = Cipher() if udp_cipher is None else udp_cipher
         self.logger = logging.getLogger(__name__)
 
@@ -52,8 +55,28 @@ class Socks5Server:
 
     async def start(self):
         try:
-            self.asyncio_server = await asyncio.start_server(self.handle_client, self.host, self.port)
-            self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port} using {len(self.ciphers)} ciphers")
+            start_port = self.port
+            iters = 0
+            while 1:
+                iters += 1
+                try:
+                    self.asyncio_server = await asyncio.start_server(self.handle_client, self.host, self.port)
+                    break
+                except OSError as ex:
+                    if self.address_changing:
+                        self.port += 1
+                        if self.port > 25565:
+                            self.port = 0
+                    else:
+                        self.logger.error(f'Can not find port to bind, {self.port} is already used')
+                        raise ex
+
+                if iters >= 10_000:
+                    self.logger.error(f'Can not find port to bind, {start_port} is already used')
+                    raise
+
+            ciphers = f'{len(self.ciphers)} ciphers' if len(self.ciphers) > 1 else self.ciphers[0].__class__.__name__
+            self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port} using {ciphers}")
             async with self.asyncio_server:
                 await self.asyncio_server.serve_forever()
         except KeyboardInterrupt:
@@ -79,11 +102,11 @@ class Socks5Server:
             await self.send(user, data, log_bytes=False)
 
             self.logger.debug('The server is authorizing the client')
-            auth_data = await default_cipher.server_auth_userpass(self.users_auth_data, reader, writer)
+            auth_data = await default_cipher.server_auth_userpass(self.db_handler, reader, writer)
             if not auth_data:
                 raise ConnectionError(f"Wrong authentication data {user}")
 
-            user.username, user.password = auth_data
+            user.username, user.password, user.key = auth_data
         else:
             data = await default_cipher.server_send_method_to_user(self.socks_version, 0xFF)
             await self.send(user, data, log_bytes=False)
@@ -91,6 +114,8 @@ class Socks5Server:
             raise ConnectionError(f'Can not use authentication method {user} - {ms}')
 
         user.handshaked = True
+        if hasattr(cipher, 'key') and user.key:
+            cipher = cipher.__class__(user.key)
         cipher.is_handshaked = True
         self.logger.debug(f'{user} is handshaked')
         return user, cipher
@@ -216,7 +241,8 @@ class Socks5Server:
 
     async def __aenter__(self):
         self.asyncio_server = await asyncio.start_server(self.handle_client, self.host, self.port)
-        self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port} using {len(self.ciphers)} ciphers")
+        ciphers = f'{len(self.ciphers)} ciphers' if len(self.ciphers) > 1 else self.ciphers[0].__class__.__name__
+        self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port} using {ciphers}")
         return self
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
@@ -227,7 +253,7 @@ class Socks5Server:
 
 class User:
     def __init__(self, server: Socks5Server, ip: str, port: int, writer: asyncio.StreamWriter, id: Optional[int] = None,
-                 handshaked: bool = False, username: str = 'Anonymous', password: Optional[str] = None):
+                 key: str = '', handshaked: bool = False, username: str = 'Anonymous', password: Optional[str] = None):
         self.server = server
         self.id = id
         self.ip = ip
@@ -237,6 +263,7 @@ class User:
         self.handshaked = handshaked
         self.username = username
         self.password = password
+        self.key = key
 
         self.connected = True
 
@@ -456,7 +483,7 @@ class ConnectionMethods:
         try:
             await asyncio.gather(
                 server.pipe(client_reader, remote_writer, stop_event, decrypt=cipher.decrypt, name='client -> server'),
-                server.pipe(remote_reader, client_writer, stop_event, encrypt=cipher.encrypt, name='client <- servers'),
+                server.pipe(remote_reader, client_writer, stop_event, encrypt=cipher.encrypt, name='client <- server'),
             )
         except (ConnectionResetError, OSError):
             pass

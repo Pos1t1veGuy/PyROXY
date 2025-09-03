@@ -533,7 +533,7 @@ class ChaCha20_Poly1305(Cipher):
 
         return method
 
-    async def server_auth_userpass(self, logins: Dict[str, str], reader: asyncio.StreamReader,
+    async def server_auth_userpass(self, db_handler: 'Handler', reader: asyncio.StreamReader,
                                    writer: asyncio.StreamWriter) -> Optional[Tuple[str, str]]:
         encrypted_header = await reader.readexactly(2 + self.overhead_length)
         auth_version, ulen = struct.unpack("!BB", b''.join(self.decrypt(encrypted_header)))
@@ -547,10 +547,12 @@ class ChaCha20_Poly1305(Cipher):
         password = await reader.readexactly(plen + self.overhead_length)
         password = b''.join(self.decrypt(password)).decode()
 
-        if logins.get(username) == password:
+        db_pw, db_key = db_handler.get_user(username)
+
+        if db_pw == password:
             writer.write(b''.join(self.encrypt(struct.pack("!BB", 1, 0))))
             await writer.drain()
-            return username, password
+            return username, password, db_key
         else:
             writer.write(b''.join(self.encrypt(struct.pack("!BB", 1, 1))))
             await writer.drain()

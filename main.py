@@ -4,14 +4,14 @@ import logging
 from pathlib import Path
 from logging.handlers import TimedRotatingFileHandler
 
-from ..proxy_server import Socks5Server
-from ..ciphers import *
-from ..db_handlers import SQLite_Handler
-from ..wrappers import HTTP_WS_Wrapper
+from pyroxy.proxy_server import Socks5Server
+from pyroxy.ciphers import *
+from pyroxy.db_handlers import SQLite_Handler
+from pyroxy.wrappers import HTTP_WS_Wrapper
 
 
-db_file = Path(__file__).parent.parent / "telegram_bot" / "db.sqlite3"
-key_file = Path(__file__).parent.parent / "telegram_bot" / "default_server_key"
+db_file = Path(__file__).parent / 'pyroxy' / "telegram_bot" / "db.sqlite3"
+key_file = Path(__file__).parent / 'pyroxy' / "telegram_bot" / "default_server_key"
 log_file = Path(__file__).parent / 'logs' / "proxy.log"
 
 
@@ -45,5 +45,5 @@ SERVER = Socks5Server(
     udp_cipher=available_ciphers[2],
     port=180
 )
-# SERVER.logger.addHandler(file_handler)
+SERVER.logger.addHandler(file_handler)
 asyncio.run(SERVER.start())

@@ -2,6 +2,8 @@
 __pycache__
 proxy.log
 client.log
-telegram_bot
-*.sqlite3
 logs
+*.sqlite3
+.pyroxy
+dist
+build

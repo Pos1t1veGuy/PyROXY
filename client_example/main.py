@@ -10,6 +10,7 @@ from ..wrappers import HTTP_WS_Wrapper
 
 
 config_file = Path(__file__).parent / "config.json"
+key = b'keykey'
 log_file = Path(__file__).parent / 'logs' / "client.log"
 
 
@@ -40,7 +41,7 @@ available_ciphers = [
 ]
 CLIENT = Socks5_TCP_Retranslator(
     config['remote_proxy_host'], int(config['remote_proxy_port']),
-    cipher_index=3,
+    cipher_index=2,
     ciphers=available_ciphers,
     udp_cipher=available_ciphers[2],
     username=config['username'],
