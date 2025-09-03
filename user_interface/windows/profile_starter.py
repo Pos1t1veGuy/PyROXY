@@ -16,6 +16,7 @@ def is_admin():
     else:
         return os.geteuid() == 0
 
+
 try:
     if not is_admin():
         input('[e] Administrator privileges required')
