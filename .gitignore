@@ -7,3 +7,4 @@ logs
 .pyroxy
 dist
 build
+*.log
