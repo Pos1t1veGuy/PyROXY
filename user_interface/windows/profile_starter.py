@@ -22,8 +22,8 @@ try:
         sys.exit(1)
 
     if '--py' in sys.argv:
-        tunnel = Path(__file__).parent.parent / 'tunnel'
-        target = f'python client.py --tun2socks_path {tunnel / "tun2socks.exe"} --wintun_path {tunnel / "wintun.dll"}'
+        tunnel = Path(__file__).parent.parent.parent / 'tunnel'
+        target = f'python client.py --tun2socks_path {tunnel / "tun2socks.exe"}'
 
     if os.path.isfile('profile.pyroxy'):
         print('[+] running with profile config...')

@@ -61,8 +61,6 @@ def main():
 
     parser.add_argument("--tun2socks_path", default=Path(__file__).parent / "tun2socks.exe",
                         help="Path to tun2socks.exe tunnel interface (wintun.dll there required)")
-    parser.add_argument("--wintun_path", default=Path(__file__).parent / "wintun.dll",
-                        help="Path to wintun.dll tunnel driver (tun2socks.exe there required)")
 
     parser.add_argument(
         "--auto_forward_traffic",
@@ -74,14 +72,9 @@ def main():
 
     args = parser.parse_args()
 
-    tunnel = Tun2Socks(args.host, path_to_exe=args.tun2socks_path, path_to_wintun=args.wintun_path,
-                       silent=not bool(args.tunnel_debug))
-
+    tunnel = Tun2Socks(args.host, path_to_exe=args.tun2socks_path, silent=not bool(args.tunnel_debug))
     if args.auto_forward_traffic == 1:
-        if tunnel.tun_started():
-            print('[e] Pyroxy already started')
-            sys.exit(1)
-
+        tunnel.stop() # to delete broken routes
         print('[+] auto forward enabled')
         tunnel.start(args.local_host, args.local_port)
 
@@ -130,10 +123,12 @@ def main():
         print(f'[e] {ex}')
     finally:
         print('[+] client closed')
-        tunnel.stop()
+
+    return tunnel
 
 
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, lambda sig, frame: sys.exit(0))
     signal.signal(signal.SIGTERM, lambda sig, frame: sys.exit(0))
-    main()
+    tunnel = main()
+    tunnel.stop()

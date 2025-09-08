@@ -7,6 +7,7 @@ import re
 import ipaddress
 import netifaces
 import json
+import psutil
 from pathlib import Path
 
 
@@ -16,17 +17,15 @@ class Tun2Socks:
     tun_proc = None
 
     def __init__(self, socks_ext: str, tun_name: str = "wintun", interface_ip: str = '10.0.0.1',
-                 path_to_exe: Optional[str] = None, path_to_wintun: Optional[str] = None,
-                 interface_mask: str = '255.255.255.0', silent: bool = True):
-        self.path_to_exe = path_to_exe if path_to_exe else Path(__file__).parent / "tun2socks.exe"
-        self.path_to_wintun = path_to_wintun if path_to_wintun else Path(__file__).parent / "wintun.dll"
+                 path_to_exe: Optional[str] = None, interface_mask: str = '255.255.255.255', silent: bool = True):
+        self.path_to_exe = Path(path_to_exe) if path_to_exe else Path(__file__).parent / "tun2socks.exe"
         self.tun_name = tun_name
         self.interface_ip = interface_ip
         self.interface_mask = interface_mask
         self.socks_ext = socks_ext
         self.silent = silent
 
-    def get_used_ips(self):
+    def get_used_ips(self) -> Set[str]:
         used = set()
         for iface in netifaces.interfaces():
             addrs = netifaces.ifaddresses(iface).get(netifaces.AF_INET, [])
@@ -34,7 +33,7 @@ class Tun2Socks:
                 used.add(addr['addr'])
         return used
 
-    def find_free_ip(self, net_str: str, mask: str):
+    def find_free_ip(self, net_str: str, mask: str) -> Tuple[str, str]:
         used_ips = self.get_used_ips()
 
         net = ipaddress.IPv4Network(f'{net_str}/{mask}', strict=False)
@@ -61,7 +60,7 @@ class Tun2Socks:
                 interfaces[name.strip()] = {"idx": int(idx), "metric": int(metric)}
         return interfaces
 
-    def get_interface_index_by_gateway(self, gateway_ip: str):
+    def get_interface_index_by_gateway(self, gateway_ip: str) -> Optional[list]:
         ps_command = f"""
         Get-NetRoute -DestinationPrefix "0.0.0.0/0" |
         Where-Object {{ $_.NextHop -eq '{gateway_ip}' }} |
@@ -87,13 +86,33 @@ class Tun2Socks:
         except json.JSONDecodeError:
             return None
 
-    def tun_started(self):
+    def tun_started(self) -> bool:
         interfaces = self.get_interfaces()
         return interfaces.get(self.tun_name) != None
+
+    def cmd_run(self, cmd: str, clear: bool = True):
+        if clear:
+            subprocess.run(cmd, shell=True, text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            print(cmd)
+            subprocess.run(cmd, shell=True, text=True)
+
+    def kill_process_by_name(self, name: str):
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                if proc.info['name'] and proc.info['name'].lower() == name.lower():
+                    print(f"Terminating {proc.info['name']} (PID: {proc.info['pid']})")
+                    proc.terminate()
+                    proc.wait(timeout=3)
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                pass
 
 
     def start(self, socks_local: str = '127.0.0.1', socks_local_port: int = 1080):
         if self.tun_proc: return
+
+        if self.tun_started():
+            self.kill_process_by_name(self.path_to_exe.name)
 
         if self.silent:
             self.tun_proc = subprocess.Popen([
@@ -109,36 +128,14 @@ class Tun2Socks:
             ])
         time.sleep(1)
 
-        self.interface_ip, self.interface_mask = self.find_free_ip(self.interface_ip, self.interface_mask)
-
-        subprocess.run(
-            f'netsh interface ip set address "{self.tun_name}" static {self.interface_ip} mask={self.interface_mask}',
-            shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            text=True
-        )
-
-        subprocess.run(
-            f'netsh interface ipv4 set interface "{self.tun_name}" metric=1',
-            shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            text=True
-        )
-
         gws = netifaces.gateways()
         default_gateway = gws.get('default', {}).get(netifaces.AF_INET)
         if default_gateway:
             self.gateway_ip, interface_name = default_gateway
             self.def_iface_id = self.get_interface_index_by_gateway(self.gateway_ip)[0]
             if self.def_iface_id:
-                subprocess.run(
-                    f'route add {self.socks_ext} mask 255.255.255.255 {self.gateway_ip} metric 1 if {self.def_iface_id}',
-                    shell=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    text=True
+                self.cmd_run(
+                    f'route add {self.socks_ext} mask 255.255.255.255 {self.gateway_ip} metric 1 if {self.def_iface_id}'
                 )
             else:
                 print(f'[e] can not find LAN gateway id by IP {self.gateway_ip}')
@@ -147,6 +144,13 @@ class Tun2Socks:
             print('[e] can not find LAN gateway IP')
             sys.exit(1)
 
+        self.interface_ip, self.interface_mask = self.find_free_ip(self.interface_ip, self.interface_mask)
+
+        self.cmd_run(
+            f'netsh interface ip set address "{self.tun_name}" static {self.interface_ip} mask={self.interface_mask}'
+        )
+        self.cmd_run(f'netsh interface ip set interface "{self.tun_name}" metric=1')
+
         interfaces = self.get_interfaces()
         try:
             iface_id = interfaces[self.tun_name]["idx"]
@@ -154,35 +158,19 @@ class Tun2Socks:
             print(f'[e] tun2socks "{self.tun_name}" interface not found')
             sys.exit(1)
 
-        subprocess.run(
-            f'route add 0.0.0.0 mask 0.0.0.0 {self.interface_ip} metric 1 if {iface_id}',
-            shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            text=True
-        )
+        self.cmd_run(f'route add 0.0.0.0 mask 0.0.0.0 {self.interface_ip} metric 1 if {iface_id}')
 
 
     def stop(self):
         try:
             interfaces = self.get_interfaces()
             iface_id = interfaces[self.tun_name]["idx"]
-            subprocess.run(
-                f'route delete 0.0.0.0 mask 0.0.0.0 if {iface_id}',
-                shell=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                text=True
-            )
+            self.cmd_run(f'route delete 0.0.0.0 mask 0.0.0.0 if {iface_id}')
         except KeyError:
             pass
 
-        subprocess.run(
-            f'route delete {self.socks_ext} mask 255.255.255.255 {self.gateway_ip} metric 1 if {self.def_iface_id}',
-            shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            text=True
+        self.cmd_run(
+            f'route delete {self.socks_ext} mask 255.255.255.255 {self.gateway_ip} metric 1 if {self.def_iface_id}'
         )
 
         if not self.tun_proc: return
