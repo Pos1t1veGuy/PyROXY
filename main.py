@@ -51,12 +51,14 @@ available_ciphers = [
     AES_CBC(key=key, iv=os.urandom(16)),
     AES_CTR(key=key, iv=os.urandom(16)),
     ChaCha20_Poly1305(key=key),
+    Cipher()
 ]
 SERVER = Socks5Server(
     db_handler=SQLite_Handler(filepath=db_file),
     ciphers=available_ciphers,
-    udp_cipher=available_ciphers[2],
-    port=80
+    udp_cipher=available_ciphers[-1],
+    port=80,
+    host='0.0.0.0',
 )
 
 SERVER.logger.setLevel(getattr(logging, args.logging.upper(), logging.INFO))

@@ -39,7 +39,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="PyROXY - makes encrypted connection to pyroxy socks5 server with selested user cipher and wrapper"
     )
-    ciphers_choices = ["none", "aes_ctr", "aes_cbc", "chacha20"]
+    ciphers_choices = ["none", "aes_ctr", "aes_cbc", "chacha20", "default"]
 
     parser.add_argument("--host", required=True, help="PyROXY server host")
     parser.add_argument("--port", type=int, default=80, help="PyROXY server port (by default 80)")
@@ -49,15 +49,13 @@ def main():
     parser.add_argument("--default_key", help="PyROXY server handshake hex key")
 
     parser.add_argument("--cipher", choices=ciphers_choices, default="none", help="Selected cipher")
-    parser.add_argument("--udp_cipher", choices=ciphers_choices, default="none", help="Selected cipher")
+    parser.add_argument("--udp_cipher", choices=ciphers_choices, default="default", help="Selected cipher")
 
     parser.add_argument("--local_host", default='127.0.0.1', help="Local client (retranslator) host")
     parser.add_argument("--local_port", type=int, default=1080, help="Local client (retranslator) port")
 
     parser.add_argument("--log", type=int, choices=[1,0], default=0, help="Enable logger (0 - false, 1 - true)")
     parser.add_argument("--tunnel_debug", type=int, choices=[1,0], default=0, help="Enable tunnel log (0 - false, 1 - true)")
-    parser.add_argument("--wrapper", choices=["none", "httpws"], default="httpws",
-                        help="PyROXY server wrapper (proxy server disguise mode, by default httpws)")
 
     parser.add_argument("--tun2socks_path", default=Path(__file__).parent / "tun2socks.exe",
                         help="Path to tun2socks.exe tunnel interface (wintun.dll there required)")
@@ -102,6 +100,7 @@ def main():
         AES_CBC(key=default_key, iv=os.urandom(16)),
         AES_CTR(key=default_key, iv=os.urandom(16)),
         ChaCha20_Poly1305(key=default_key),
+        Cipher(), # without wrapper
     ]
 
     try:
