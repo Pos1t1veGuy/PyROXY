@@ -4,6 +4,7 @@ import socket
 import logging
 import ipaddress
 import struct
+import time
 
 from .logger_setup import *
 from .base_cipher import Cipher, REPLYES_CODES
@@ -40,7 +41,7 @@ class Socks5Client:
                         password: Optional[str] = None) -> 'TCP_ProxySession':
         reader, writer = await asyncio.open_connection(proxy_host, proxy_port)
         try:
-            cipher = self.ciphers[self.cipher_index].__class__(self.cipher_key)
+            cipher = self.ciphers[self.cipher_index].copy()
             default_cipher = self.ciphers[0].copy()
         except IndexError:
             raise IndexError(f'Invalid cipher index choosed: {self.cipher_index} of list {self.ciphers}')
@@ -125,7 +126,7 @@ class Socks5Client:
         )
         await session.asend(cmd_bytes, encrypt=False, log_bytes=False)
         udp_host, udp_port = await session.cipher.client_connect_confirm(session.reader)
-        udp_session = await UDP_ProxySession.create(udp_host, udp_port, self.udp_cipher.copy())
+        udp_session = await UDP_ProxySession.create(udp_host, udp_port, self.udp_cipher.copy(), target_host, target_port)
 
         self.logger.debug(f"Got an associated UDP server {udp_session.host}:{udp_session.port} through proxy")
         return udp_session, session
@@ -303,10 +304,12 @@ class TCP_ProxySession:
         return f'{self.__class__.__name__}(host={self.host}, port={self.port})'
 
 class UDP_ProxySession(asyncio.DatagramProtocol):
-    def __init__(self, cipher: 'Cipher'):
+    def __init__(self, cipher: 'Cipher', dst_ip: str, dst_port: int):
         self.transport = None
         self.recv_queue = asyncio.Queue()
         self.logger = logging.getLogger(__name__)
+        self.dst_ip = dst_ip
+        self.dst_port = dst_port
         self.host = 'N/A'
         self.port = 0
         self.cipher = cipher
@@ -317,7 +320,7 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
 
 
     def send(self, data: bytes):
-        header_socks5 = self.format_socks5_udp_header(self.host, self.port)
+        header_socks5 = self.format_socks5_udp_header(self.dst_ip, self.dst_port)
         self.raw_send(b''.join(self.cipher.encrypt(header_socks5 + data)))
         self.logger.debug(f"Sent {len(data)} bytes to UDP proxy {self.addr}")
 
@@ -363,10 +366,10 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
         self.recv_queue.put_nowait((data, addr))
 
     def error_received(self, exc):
-        pass # raise ConnectionError(f"{self} error: {exc}")
+        self.logger.error(f"{self} error: {exc}")
 
     def connection_lost(self, exc):
-        pass # raise ConnectionError(f"{self} connection with {self.client_ip}:{self.client_port} closed")
+        self.logger.error(f"{self} connection with {self.client_ip}:{self.client_port} closed")
 
     def raw_send(self, data: bytes):
         if self.transport is not None:
@@ -385,10 +388,10 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
         self.recv_queue.put_nowait((None, None))
 
     @staticmethod
-    async def create(host: str, port: int, cipher: 'Cipher') -> 'UDPClient':
+    async def create(host: str, port: int, cipher: 'Cipher', target_host: str, target_port: int) -> 'UDP_ProxySession':
         loop = asyncio.get_running_loop()
         transport, protocol = await loop.create_datagram_endpoint(
-            lambda: UDP_ProxySession(cipher),
+            lambda: UDP_ProxySession(cipher, target_host, target_port),
             remote_addr=(host, port)
         )
         protocol.transport = transport
@@ -407,9 +410,10 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
 
 class Socks5_UDP_Retranslator(UDP_ProxySession):
     def __init__(self, remote_host: str, remote_port: int, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        super().__init__(*args, remote_host, remote_port, **kwargs)
         self.remote_host = remote_host
         self.remote_port = remote_port
+        self.client_addr = None
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]):
         self.last_activity = time.time()
@@ -420,18 +424,31 @@ class Socks5_UDP_Retranslator(UDP_ProxySession):
 
         try:
             if addr == self.client_addr: # from client
-                self.transport.sendto(self.cipher.encrypt(data), (self.remote_host, self.remote_port))
+                for packet in self.cipher.encrypt(data):
+                    self.transport.sendto(packet, (self.remote_host, self.remote_port))
                 self.logger.debug(
-                    f"{self.client_addr}->UDP->{self.remote_host}:{self.remote_port} translated {len(data)} bytes"
+                    f"{self.client_addr}->{self.remote_host}:{self.remote_port} translated {len(data)} bytes"
                 )
             elif self.client_addr: # from server
-                self.transport.sendto(self.cipher.decrypt(data), self.client_addr)
+                for packet in self.cipher.decrypt(data):
+                    self.transport.sendto(packet, self.client_addr)
                 self.logger.debug(
-                    f"{self.client_addr}<-UDP<-{self.remote_host}:{self.remote_port} translated {len(data)} bytes"
+                    f"{self.client_addr}<-{self.remote_host}:{self.remote_port} translated {len(data)} bytes"
                 )
 
         except Exception as e:
             self.logger.error(f"UDP relay error: {e}")
+
+    @staticmethod
+    async def create(host: str, port: int, cipher: 'Cipher', target_host: str, target_port: int) -> 'Socks5_UDP_Retranslator':
+        loop = asyncio.get_running_loop()
+        transport, protocol = await loop.create_datagram_endpoint(
+            lambda: Socks5_UDP_Retranslator(target_host, port, cipher),
+            local_addr=('0.0.0.0', port)
+        )
+        protocol.transport = transport
+        protocol.host, protocol.port = protocol.transport.get_extra_info('sockname')
+        return protocol
 
 class Socks5_TCP_Retranslator(Socks5Client):
     def __init__(self, remote_host: str, remote_port: int, username: str = '', password: str = '', *args, **kwargs):
@@ -489,7 +506,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
         addr, port, command = await default_cipher.server_handle_command(
             self.socks_version, self.local_server.user_commands, client_reader
         )
-        self.logger.info(f'Local client {user} sent command {command.__qualname__}')
+        self.logger.info(f'Local client {user} sent command {command.__qualname__} to {addr}:{port}')
 
         # Connecting to the remote proxy, sending command
         try:
@@ -513,6 +530,28 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
 
         if command == ConnectionMethods.CONNECT:
+            if addr == '0.0.0.0' and port == 0 or addr.startswith('192.168') or addr == self.remote_host:
+                self.logger.warning(
+                    f'INVALID IP ADDRESS TO CONNECT: Ignored {user}`s request to {addr}. You may try to reboot the '
+                    f'computer to delete this message.'
+                )
+                try:
+                    reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'],
+                                                                   '0.0.0.0', 0)
+                    for r in reply:
+                        client_writer.write(r)
+                    await client_writer.drain()
+                except Exception as e:
+                    try:
+                        client_writer.write(
+                            await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'],
+                                                                   '0.0.0.0', 0)
+                        )
+                        await client_writer.drain()
+                    except:
+                        pass
+                return
+
             cmd_bytes = await remote_session.cipher.client_command(
                 self.socks_version, self.user_commands['connect'], addr, port
             )
@@ -569,7 +608,9 @@ class Socks5_TCP_Retranslator(Socks5Client):
             loop = asyncio.get_running_loop()
 
             try:
-                udp_session = await Socks5_UDP_Retranslator.create(address, port, remote_session.cipher)
+                udp_session = await Socks5_UDP_Retranslator.create(
+                    address, port, self.udp_cipher, self.remote_host, self.remote_port
+                )
             except Exception as e:
                 self.logger.error(f"Failed to start UDP relay: {e}")
                 reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0)
@@ -579,7 +620,6 @@ class Socks5_TCP_Retranslator(Socks5Client):
                 return 1
 
             udp_host, udp_port = udp_session.transport.get_extra_info('sockname')
-            udp_host = '127.0.0.1' if udp_host == '0.0.0.0' else udp_host
             self.logger.info(f"Started UDP server for {addr}:{port} at {udp_host}:{udp_port}")
 
             try:
@@ -594,7 +634,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
                     await client_writer.drain()
                 except:
                     pass
-                return
+                return 1
 
             try:
                 while True:

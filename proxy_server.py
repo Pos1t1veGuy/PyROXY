@@ -114,8 +114,19 @@ class Socks5Server:
             raise ConnectionError(f'Can not use authentication method {user} - {ms}')
 
         user.handshaked = True
-        if hasattr(cipher, 'key') and user.key:
-            cipher = cipher.__class__(user.key)
+        if hasattr(cipher, 'key'):
+            if user.key:
+                key = user.key
+            elif not type(cipher) == Cipher:
+                key = cipher.key
+
+        kws = {}
+        if hasattr(default_cipher, 'iv') and hasattr(cipher, 'iv'):
+            kws['iv'] = default_cipher.iv
+        if hasattr(default_cipher, 'nonce') and hasattr(cipher, 'nonce'):
+            kws['nonce'] = default_cipher.nonce
+        cipher = cipher.__class__(key, **kws) if hasattr(cipher, 'key') else cipher.__class__(**kws)
+
         cipher.is_handshaked = True
         self.logger.debug(f'{user} is handshaked')
         return user, cipher
@@ -157,18 +168,19 @@ class Socks5Server:
             else:
                 self.logger.warning(f'Suspicious client tried to connect: {user}')
 
-        except Exception as e:
-            self.logger.error(f"Connection error: {e}")
+        # except Exception as e:
+        #     self.logger.error(f"Connection error: {e}")
 
         finally:
             await user.disconnect()
 
     async def pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, stop_event: asyncio.Event,
-                   name: str = 'default', encrypt: Optional[callable] = None, decrypt: Optional[callable] = None):
+                   name: str = 'default', encrypt: Optional[callable] = None, decrypt: Optional[callable] = None,
+                   timeout: int = 300):
         try:
             buffer = bytearray()
             while not reader.at_eof():
-                data = await reader.read(4096)
+                data = await asyncio.wait_for(reader.read(4096), timeout=timeout)
                 if not data:
                     break
                 if self.log_bytes:
@@ -185,12 +197,17 @@ class Socks5Server:
                         self.bytes_sent += len(frame)
 
                 await writer.drain()
+        except asyncio.TimeoutError:
+            pass
         except Exception as e:
-            self.logger.error(f"Proxying PIPE '{name}' error: {e}")
+            self.logger.error(f"Proxying PIPE '{name}' error: {type(e).__name__} | {repr(e)}")
         finally:
             stop_event.set()
-            writer.close()
-            await writer.wait_closed()
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except:
+                pass
 
     async def send(self, user: 'User', data: Union[bytes, List[bytes]], log_bytes: bool = True):
         if isinstance(data, list):
@@ -442,7 +459,7 @@ class UDPServerProxy(asyncio.DatagramProtocol):
             packet = header + payload
 
             if self.client_addr:
-                self.transport.sendto(self.cipher.encrypt(packet), self.client_addr)
+                self.transport.sendto(self.cipher.encrypt(packet)[0], self.client_addr)
 
         except Exception as e:
             self.logger.error(f"Failed to build SOCKS5 UDP reply: {e}")
@@ -515,7 +532,6 @@ class ConnectionMethods:
             return 1
 
         udp_host, udp_port = transport.get_extra_info('sockname')
-        udp_host = '127.0.0.1' if udp_host == '0.0.0.0' else udp_host
         server.logger.info(f"Started UDP server for {addr}:{port} at {udp_host}:{udp_port}")
 
         try:
@@ -527,7 +543,7 @@ class ConnectionMethods:
             reply = b''.join(await default_cipher.server_make_reply(self.socks_version, 0xFF, '0.0.0.0', 0))
             client_writer.write(reply)
             await client_writer.drain()
-            return
+            return 1
 
         try:
             while True:

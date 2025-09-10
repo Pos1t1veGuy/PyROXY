@@ -18,15 +18,16 @@ from ..base_cipher import Cipher, REPLYES
 
 class AES_CTR(Cipher):
     def __init__(self, key: bytes, iv: Optional[bytes] = None, iv_length: int = 16, **kwargs):
-        super().__init__(key, iv=iv, **kwargs)
-        self.key = hashlib.sha256(key).digest()
-        self.iv = iv
+        self.iv = iv if iv else os.urandom(16)
+        self.key = key
+        super().__init__(self.key, iv=self.iv, **kwargs)
         self.iv_length = iv_length
         self.encryptor = None
         self.decryptor = None
+        self.dec = 0
+        self.enc = 0
 
-        if iv is not None:
-            self._init_ciphers(iv)
+        self._init_ciphers(self.iv)
 
     def _init_ciphers(self, iv: bytes):
         ctr_enc = Counter.new(128, initial_value=int.from_bytes(iv, byteorder='big'))
@@ -210,12 +211,14 @@ class AES_CTR(Cipher):
 
     def encrypt(self, data: bytes) -> List[bytes]:
         if not self.encryptor is None:
+            self.enc += 1
             return [self.wrapper.wrap(self.encryptor.encrypt(data))]
         else:
             raise OSError(f'{self.__class__.__name__} needs to specify IV (init vector) in constructor or handshake')
 
     def decrypt(self, data: bytes) -> List[bytes]:
         if not self.encryptor is None:
+            self.dec += 1
             return [self.decryptor.decrypt(self.wrapper.wrap(data))]
         else:
             raise OSError(f'{self.__class__.__name__} needs to specify IV (init vector) in constructor or handshake')
@@ -223,15 +226,14 @@ class AES_CTR(Cipher):
 
 class AES_CBC(Cipher):
     def __init__(self, key: bytes, iv: Optional[bytes] = None, iv_length: int = 16, **kwargs):
-        super().__init__(key, iv=iv, **kwargs)
-        self.key = hashlib.sha256(key).digest()
-        self.iv = iv
+        self.iv = iv if iv else os.urandom(16)
+        self.key = key
+        super().__init__(self.key, iv=self.iv, **kwargs)
         self.iv_length = iv_length
         self.encryptor = None
         self.decryptor = None
 
-        if iv is not None:
-            self._init_ciphers(iv)
+        self._init_ciphers(self.iv)
 
     def _init_ciphers(self, iv: bytes):
         self.encryptor = AES.new(self.key, AES.MODE_CBC, iv=iv)
