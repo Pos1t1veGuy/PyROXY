@@ -41,10 +41,20 @@ class Socks5Client:
                         password: Optional[str] = None) -> 'TCP_ProxySession':
         reader, writer = await asyncio.open_connection(proxy_host, proxy_port)
         try:
-            cipher = self.ciphers[self.cipher_index].copy()
+            cipher = self.ciphers[self.cipher_index]
             default_cipher = self.ciphers[0].copy()
         except IndexError:
             raise IndexError(f'Invalid cipher index choosed: {self.cipher_index} of list {self.ciphers}')
+
+        if hasattr(cipher, 'key'):
+            if cipher.key != self.cipher_key:
+                kws = {}
+                if hasattr(default_cipher, 'iv') and hasattr(cipher, 'iv'):
+                    kws['iv'] = cipher.iv
+                if hasattr(default_cipher, 'nonce') and hasattr(cipher, 'nonce'):
+                    kws['nonce'] = cipher.nonce
+                cipher = cipher.__class__(self.cipher_key, **kws) if hasattr(cipher, 'key') else cipher.__class__(**kws)
+
         session = TCP_ProxySession(self, reader, writer, cipher, proxy_host, proxy_port,
                                    username=username, password=password, log_bytes=self.log_bytes)
         self.sessions.append(session)
@@ -156,7 +166,7 @@ class TCP_ProxySession:
         self.logger = self.client.logger
         self.reader = reader
         self.writer = writer
-        self.cipher = cipher
+        self.cipher = cipher.copy()
         self.host = host
         self.port = port
 
@@ -312,7 +322,7 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
         self.dst_port = dst_port
         self.host = 'N/A'
         self.port = 0
-        self.cipher = cipher
+        self.cipher = cipher.copy()
 
         self.client_ip = 'N/A'
         self.client_port = 0
@@ -413,7 +423,9 @@ class Socks5_UDP_Retranslator(UDP_ProxySession):
         super().__init__(*args, remote_host, remote_port, **kwargs)
         self.remote_host = remote_host
         self.remote_port = remote_port
-        self.client_addr = None
+
+        self.client_addr: Optional[Tuple[str, int]] = None
+        self.client_addr_format = None
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]):
         self.last_activity = time.time()
@@ -421,19 +433,20 @@ class Socks5_UDP_Retranslator(UDP_ProxySession):
 
         if self.client_addr is None:
             self.client_addr = addr
+            self.client_addr_format = f'{self.client_addr[0]}:{self.client_addr[1]}'
 
         try:
             if addr == self.client_addr: # from client
                 for packet in self.cipher.encrypt(data):
                     self.transport.sendto(packet, (self.remote_host, self.remote_port))
                 self.logger.debug(
-                    f"{self.client_addr}->{self.remote_host}:{self.remote_port} translated {len(data)} bytes"
+                    f"{self.client_addr_format}->{self.remote_host}:{self.remote_port} translated {len(data)} bytes"
                 )
-            elif self.client_addr: # from server
+            else: # from server
                 for packet in self.cipher.decrypt(data):
                     self.transport.sendto(packet, self.client_addr)
                 self.logger.debug(
-                    f"{self.client_addr}<-{self.remote_host}:{self.remote_port} translated {len(data)} bytes"
+                    f"{self.client_addr_format}<-{self.remote_host}:{self.remote_port} translated {len(data)} bytes"
                 )
 
         except Exception as e:
@@ -530,8 +543,9 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
 
         if command == ConnectionMethods.CONNECT:
-            if addr == '0.0.0.0' and port == 0 or addr.startswith('192.168') or addr == self.remote_host:
-                self.logger.warning(
+            if (addr == '0.0.0.0' and port == 0) or (addr.startswith('192.168') or addr.startswith('10.') or
+                                                     addr.startswith('127.')) or addr == self.remote_host:
+                self.logger.debug(
                     f'INVALID IP ADDRESS TO CONNECT: Ignored {user}`s request to {addr}. You may try to reboot the '
                     f'computer to delete this message.'
                 )

@@ -168,8 +168,8 @@ class Socks5Server:
             else:
                 self.logger.warning(f'Suspicious client tried to connect: {user}')
 
-        # except Exception as e:
-        #     self.logger.error(f"Connection error: {e}")
+        except Exception as e:
+            self.logger.error(f"Connection error: {type(e).__name__} | {repr(e)}")
 
         finally:
             await user.disconnect()

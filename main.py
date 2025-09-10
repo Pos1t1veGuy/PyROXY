@@ -56,7 +56,7 @@ available_ciphers = [
 SERVER = Socks5Server(
     db_handler=SQLite_Handler(filepath=db_file),
     ciphers=available_ciphers,
-    udp_cipher=available_ciphers[-1],
+    udp_cipher=available_ciphers[2].copy(),
     port=80,
     host='0.0.0.0',
 )
