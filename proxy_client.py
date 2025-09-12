@@ -47,7 +47,7 @@ class Socks5Client:
             raise IndexError(f'Invalid cipher index choosed: {self.cipher_index} of list {self.ciphers}')
 
         if hasattr(cipher, 'key'):
-            if cipher.key != self.cipher_key:
+            if cipher.key != self.cipher_key and self.cipher_key != '':
                 kws = {}
                 if hasattr(default_cipher, 'iv') and hasattr(cipher, 'iv'):
                     kws['iv'] = cipher.iv
@@ -136,7 +136,7 @@ class Socks5Client:
         )
         await session.asend(cmd_bytes, encrypt=False, log_bytes=False)
         udp_host, udp_port = await session.cipher.client_connect_confirm(session.reader)
-        udp_session = await UDP_ProxySession.create(target_host, udp_port, self.udp_cipher.copy())
+        udp_session = await UDP_ProxySession.create(udp_host, udp_port, self.udp_cipher.copy(), target_host, target_port)
 
         self.logger.debug(f"Got an associated UDP server {udp_session.host}:{udp_session.port} through proxy")
         return udp_session, session
@@ -300,8 +300,18 @@ class TCP_ProxySession:
 
 
     async def close(self):
-        self.writer.close()
-        await self.writer.wait_closed()
+        try:
+            writer.close()
+        except:
+            pass
+        try:
+            await asyncio.wait_for(writer.wait_closed(), timeout=5.0)
+        except:
+            pass
+        try:
+            writer.transport.abort()
+        except:
+            pass
         self.closed = True
         self.logger.debug(f"{self.client} session closed to {self.addr}")
 
@@ -419,13 +429,28 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
 
 
 class Socks5_UDP_Retranslator(UDP_ProxySession):
-    def __init__(self, remote_host: str, remote_port: int, *args, **kwargs):
+    def __init__(self, remote_host: str, remote_port: int, *args, timeout: int = 5*60, **kwargs):
         super().__init__(*args, remote_host, remote_port, **kwargs)
         self.remote_host = remote_host
         self.remote_port = remote_port
+        self.timeout = timeout
 
         self.client_addr: Optional[Tuple[str, int]] = None
         self.client_addr_format = None
+        self.last_activity = time.time()
+        self.stop = False
+
+    def connection_made(self, transport):
+        super().connection_made(transport)
+        asyncio.create_task(self.monitor_timeout())
+
+    async def monitor_timeout(self):
+        while not self.stop:
+            await asyncio.sleep(1)
+            if time.time() - self.last_activity > self.timeout:
+                self.logger.debug(f"{self} timeout reached. Closing...")
+                self.transport.close()
+                self.stop = True
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]):
         self.last_activity = time.time()
@@ -463,6 +488,10 @@ class Socks5_UDP_Retranslator(UDP_ProxySession):
         protocol.host, protocol.port = protocol.transport.get_extra_info('sockname')
         return protocol
 
+    def connection_lost(self, exc):
+        super().connection_lost(exc)
+        self.stop = True
+
 class Socks5_TCP_Retranslator(Socks5Client):
     def __init__(self, remote_host: str, remote_port: int, username: str = '', password: str = '', *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -470,7 +499,9 @@ class Socks5_TCP_Retranslator(Socks5Client):
         self.remote_port = remote_port
         self.username = username
         self.password = password
+
         self.pipe = Socks5Server.pipe
+        self.close_writer = Socks5Server.close_writer
 
         self._local_host = 'localhost'
         self._local_host = 0
@@ -597,12 +628,11 @@ class Socks5_TCP_Retranslator(Socks5Client):
                     pass
                 return
 
-            stop_event = asyncio.Event()
             try:
                 await asyncio.gather(
-                    self.pipe(self, client_reader, remote_session.writer, stop_event, encrypt=remote_session.cipher.encrypt,
+                    self.pipe(self, client_reader, remote_session.writer, encrypt=remote_session.cipher.encrypt,
                               name='client -> server'),
-                    self.pipe(self, remote_session.reader, client_writer, stop_event, decrypt=remote_session.cipher.decrypt,
+                    self.pipe(self, remote_session.reader, client_writer, decrypt=remote_session.cipher.decrypt,
                               name='client <- server'),
                 )
             except (ConnectionResetError, OSError):
@@ -667,7 +697,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
                             self.logger.debug("TCP writer closing: closing UDP assoc.")
                             break
 
-                        await asyncio.sleep(.5)
+                        await asyncio.sleep(2)
                     except Exception as e:
                         self.logger.warning(f"UDP_ASSOCIATE TCP connection error: {e}")
                         break
@@ -681,3 +711,10 @@ class Socks5_TCP_Retranslator(Socks5Client):
             )
             await remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False)
             address, port = await remote_session.cipher.client_connect_confirm(remote_session.reader)
+
+
+        await self.close_writer(client_writer)
+        try:
+            await remote_session.close()
+        except:
+            pass
