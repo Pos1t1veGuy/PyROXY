@@ -13,7 +13,7 @@ from Cryptodome.Util import Counter
 from Cryptodome.Util.Padding import pad, unpad
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
-from ..base_cipher import Cipher, REPLYES
+from ..base_cipher import Cipher, REPLYES, get_address
 
 
 class AES_CTR(Cipher):
@@ -24,8 +24,6 @@ class AES_CTR(Cipher):
         self.iv_length = iv_length
         self.encryptor = None
         self.decryptor = None
-        self.dec = 0
-        self.enc = 0
 
         self._init_ciphers(self.iv)
 
@@ -153,26 +151,16 @@ class AES_CTR(Cipher):
 
         match address_type:
             case 0x01:  # IPv4
-                data = await reader.readexactly(4 + 2)
-                data = b''.join(self.decrypt(data))
-                addr = '.'.join(map(str, data[:4]))
-                port = int.from_bytes(data[4:], 'big')
-
+                addr_bytes = await reader.readexactly(4 + 2)
             case 0x03:  # domain
                 domain_len = b''.join(self.decrypt(await reader.readexactly(1)))[0]
-                data = b''.join(self.decrypt(await reader.readexactly(domain_len + 2)))
-                addr = data[:domain_len].decode()
-                port = int.from_bytes(data[domain_len:], 'big')
-
+                addr_bytes = b''.join(self.decrypt(await reader.readexactly(domain_len + 2)))
             case 0x04:  # IPv6
-                data = b''.join(self.decrypt(await reader.readexactly(16 + 2)))
-                addr = socket.inet_ntop(socket.AF_INET6, data[:16])
-                port = int.from_bytes(data[16:], 'big')
-
+                addr_bytes = b''.join(self.decrypt(await reader.readexactly(16 + 2)))
             case _:
                 raise ConnectionError(f"Invalid address: {address_type}, it must be 0x01/0x03/0x04")
 
-        return addr, port, cmd
+        return *get_address(addr_bytes, address_type), cmd
 
     async def server_make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> List[bytes]:
         return self.encrypt(
@@ -211,14 +199,12 @@ class AES_CTR(Cipher):
 
     def encrypt(self, data: bytes) -> List[bytes]:
         if not self.encryptor is None:
-            self.enc += 1
             return [self.wrapper.wrap(self.encryptor.encrypt(data))]
         else:
             raise OSError(f'{self.__class__.__name__} needs to specify IV (init vector) in constructor or handshake')
 
     def decrypt(self, data: bytes) -> List[bytes]:
         if not self.encryptor is None:
-            self.dec += 1
             return [self.decryptor.decrypt(self.wrapper.wrap(data))]
         else:
             raise OSError(f'{self.__class__.__name__} needs to specify IV (init vector) in constructor or handshake')
@@ -366,27 +352,16 @@ class AES_CBC(Cipher):
 
         match address_type:
             case 0x01:  # IPv4
-                encrypted = await reader.readexactly(AES.block_size)
-                data = b''.join(self.decrypt(encrypted))
-                addr = '.'.join(map(str, data[:4]))
-                port = int.from_bytes(data[4:], 'big')
-
+                addr_bytes = b''.join(self.decrypt(await reader.readexactly(AES.block_size)))
             case 0x03:  # domain
-                total_len = length + 2
-                padded_len = ((total_len + 15) // AES.block_size) * AES.block_size
-                data = b''.join(self.decrypt(await reader.readexactly(padded_len)))
-                addr = data[:length].decode()
-                port = int.from_bytes(data[length:], 'big')
-
+                padded_len = ((length + 2 + 15) // AES.block_size) * AES.block_size
+                addr_bytes = b''.join(self.decrypt(await reader.readexactly(padded_len)))
             case 0x04:  # IPv6
-                data = b''.join(self.decrypt(await reader.readexactly(2*16)))
-                addr = socket.inet_ntop(socket.AF_INET6, data[:16])
-                port = int.from_bytes(data[16:], 'big')
-
+                addr_bytes = b''.join(self.decrypt(await reader.readexactly(2*16)))
             case _:
                 raise ConnectionError(f"Invalid address: {address_type}, it must be 0x01/0x03/0x04")
 
-        return addr, port, cmd
+        return *get_address(addr_bytes, address_type), cmd
 
     async def server_make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> bytes:
         address_type = 0x01
@@ -614,20 +589,7 @@ class ChaCha20_Poly1305(Cipher):
 
 
         data = b''.join(self.decrypt(await reader.readexactly(address_length + self.overhead_length)))
-        match address_type:
-            case 0x01:  # IPv4
-                addr = '.'.join(map(str, data[:4]))
-                port = int.from_bytes(data[4:], 'big')
-            case 0x03:  # domain
-                addr = data[:-2].decode()
-                port = int.from_bytes(data[-2:], 'big')
-            case 0x04:  # IPv6
-                addr = socket.inet_ntop(socket.AF_INET6, data[:16])
-                port = int.from_bytes(data[16:], 'big')
-            case _:
-                raise ConnectionError(f"Invalid address: {address_type}, it must be 0x01/0x03/0x04")
-
-        return addr, port, cmd
+        return *get_address(data, address_type), cmd
 
     async def server_make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> bytes:
         address_type = 0x01
@@ -716,9 +678,10 @@ class ChaCha20_Poly1305(Cipher):
         for i in range(0, len(data), chunk_size):
             chunk = data[i:i + chunk_size]
             nonce = self.nonce
-            result.append(len(chunk).to_bytes(2, byteorder='big') + nonce + self.cipher.encrypt(nonce, chunk, None))
+            encrypted = len(chunk).to_bytes(2, byteorder='big') + nonce + self.cipher.encrypt(nonce, chunk, None)
+            result.append(encrypted if i != 0 else self.wrapper.wrap(encrypted))
 
-        return self.wrapper.wrap(result)
+        return result
 
     def decrypt(self, data: bytes) -> List[bytes]:
         data = self.wrapper.unwrap(data)

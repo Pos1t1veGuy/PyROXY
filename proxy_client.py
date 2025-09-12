@@ -5,6 +5,7 @@ import logging
 import ipaddress
 import struct
 import time
+import traceback as tb
 
 from .logger_setup import *
 from .base_cipher import Cipher, REPLYES_CODES
@@ -347,7 +348,7 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
     async def recv(self, timeout: int = 5) -> Tuple[bytes, Tuple[str, int]]:
         data = await asyncio.wait_for(self.raw_recv(), timeout=timeout)
         self.logger.debug(f"Readed {len(data)} bytes from UDP proxy {self.addr}")
-        return self.cipher.decrypt(data[0]), data[1]
+        return b''.join(self.cipher.decrypt(data[0])), data[1]
 
 
     def format_socks5_udp_header(self, host: str, port: int) -> bytes:
@@ -412,7 +413,7 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
         loop = asyncio.get_running_loop()
         transport, protocol = await loop.create_datagram_endpoint(
             lambda: UDP_ProxySession(cipher, target_host, target_port),
-            remote_addr=(host, port)
+            remote_addr=('127.0.0.1', port)
         )
         protocol.transport = transport
         protocol.host, protocol.port = protocol.transport.get_extra_info('sockname')
@@ -514,6 +515,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
             self.local_server = Socks5Server(host=local_host, port=local_port, accept_anonymous=True)
             self.local_server.handle_client = self.handle_local_client
             self.logger.info(f"Retranslator started at {local_host}:{local_port} for {self.remote_host}:{self.remote_port}")
+            self.local_server.logger = self.logger
 
             self._local_host = self.local_server.host
             self._local_host = self.local_server.port
@@ -656,6 +658,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
                     self.remote_host, port, self.udp_cipher
                 )
             except Exception as e:
+                tb.print_stack()
                 self.logger.error(f"Failed to start UDP relay: {e}")
                 reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0)
                 for r in reply:
@@ -663,11 +666,11 @@ class Socks5_TCP_Retranslator(Socks5Client):
                 await client_writer.drain()
                 return 1
 
-            udp_host, udp_port = udp_session.transport.get_extra_info('sockname')
-            self.logger.info(f"Started UDP server for {addr}:{port} at {udp_host}:{udp_port}")
+            self.logger.info(f"Started UDP server for {addr}:{port} at {udp_session.host}:{udp_session.port}")
 
             try:
-                reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['succeeded'], udp_host, udp_port)
+                reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['succeeded'],
+                                                               udp_session.host, udp_session.port)
                 for r in reply:
                     client_writer.write(r)
                 await client_writer.drain()

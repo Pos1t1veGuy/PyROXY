@@ -8,7 +8,7 @@ import time
 from collections import deque
 
 from .logger_setup import *
-from .base_cipher import Cipher, REPLYES_CODES
+from .base_cipher import Cipher, REPLYES_CODES, get_address, resolve_domain, encode_ip
 from .db_handlers import SQLite_Handler
 
 
@@ -150,6 +150,7 @@ class Socks5Server:
         cipher = cipher.__class__(key, **kws) if hasattr(cipher, 'key') else cipher.__class__(**kws)
 
         cipher.is_handshaked = True
+        user.cipher = cipher
         self.logger.debug(f'{user} is handshaked')
         return user, cipher
 
@@ -210,7 +211,7 @@ class Socks5Server:
                 self.logger.warning(f'Suspicious client tried to connect: {user}')
 
         except Exception as e:
-            self.logger.error(f"Connection error: {type(e).__name__} | {repr(e)}")
+            self.logger.error(f"Connection error: {repr(e)}")
 
         finally:
             alive_time = time.time() - connection_start_time
@@ -252,7 +253,7 @@ class Socks5Server:
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            self.logger.error(f"Proxying PIPE '{name}' error: {type(e).__name__} | {repr(e)}")
+            self.logger.error(f"Proxying PIPE '{name}' error: {repr(e)}")
         finally:
             await self.close_writer(writer)
 
@@ -333,7 +334,9 @@ class Socks5Server:
 
 class User:
     def __init__(self, server: Socks5Server, ip: str, port: int, writer: asyncio.StreamWriter, id: Optional[int] = None,
-                 key: str = '', handshaked: bool = False, username: str = 'Anonymous', password: Optional[str] = None):
+                 key: str = '', handshaked: bool = False, username: str = 'Anonymous', password: Optional[str] = None,
+                 cipher: Optional[Cipher] = None):
+
         self.server = server
         self.id = id
         self.ip = ip
@@ -344,6 +347,7 @@ class User:
         self.username = username
         self.password = password
         self.key = key
+        self.cipher = cipher
 
         self.connected = True
 
@@ -363,10 +367,11 @@ class User:
 
 
 class UDPServerProxy(asyncio.DatagramProtocol):
-    def __init__(self, tcp_server: Socks5Server):
+    def __init__(self, tcp_server: Socks5Server, user: User):
         self.tcp_server = tcp_server
-        self.cipher = self.tcp_server.udp_cipher.copy()
         self.logger = self.tcp_server.logger
+        self.cipher = self.tcp_server.udp_cipher.copy()
+        self.user = user
         self.timeout = self.tcp_server.udp_server_timeout
 
         self.last_activity = time.time()
@@ -398,7 +403,6 @@ class UDPServerProxy(asyncio.DatagramProtocol):
     def datagram_received(self, data: bytes, addr: Tuple[str, int]):
         self.last_activity = time.time()
         self.logger.debug(f"UDP packet received from {addr}")
-        self.bytes_received += len(data)
 
         try:
             if self.client_addr is None:
@@ -428,46 +432,29 @@ class UDPServerProxy(asyncio.DatagramProtocol):
                 if len(data) < offset + 4 + 2:
                     self.logger.warning("Truncated IPv4 header in UDP packet.")
                     return
-                dst_addr = socket.inet_ntoa(data[offset:offset + 4])
-                offset += 4
-
+                offset += 4 + 2
             elif atyp == 0x03:  # Domain
                 if len(data) < offset + 1:
                     self.logger.warning("Truncated domain length in UDP packet.")
                     return
                 domain_len = data[offset]
-                offset += 1
-                if len(data) < offset + domain_len + 2:
-                    self.logger.warning("Truncated domain in UDP packet.")
-                    return
-                dst_addr = data[offset:offset + domain_len].decode(errors="replace")
-                offset += domain_len
-
+                offset += domain_len + 2 + 1
             elif atyp == 0x04:  # IPv6
                 if len(data) < offset + 16 + 2:
                     self.logger.warning("Truncated IPv6 header in UDP packet.")
                     return
-                dst_addr = socket.inet_ntop(socket.AF_INET6, data[offset:offset + 16])
-                offset += 16
-
+                offset += 16 + 2
             else:
                 self.logger.warning(f"Unknown ATYP={atyp} in UDP packet.")
                 return
 
-            dst_port = struct.unpack("!H", data[offset:offset + 2])[0]
-            offset += 2
-
+            dst_addr, dst_port = get_address(data[4:offset], atyp)
             payload = data[offset:]
             self.logger.debug(f"Client->Remote UDP: {len(payload)} bytes to {dst_addr}:{dst_port}")
 
             if atyp == 0x03:
                 try:
-                    infos = socket.getaddrinfo(dst_addr, dst_port, type=socket.SOCK_DGRAM)
-                    for fam, *_rest, sockaddr in infos:
-                        if fam in (socket.AF_INET, socket.AF_INET6):
-                            dst_addr = sockaddr[0]
-                            dst_port = sockaddr[1]
-                            break
+                    dst_addr, dst_port = resolve_domain(dst_addr, dst_port)
                 except Exception as e:
                     self.logger.warning(f"DNS resolve failed for {dst_addr}: {e}")
                     return
@@ -477,7 +464,7 @@ class UDPServerProxy(asyncio.DatagramProtocol):
             elif frag == 0:
                 keys = list(sorted(self.fragment_buffer.keys()))
                 if self.fragment_buffer:
-                    if keys == list(range(keys[0], keys[-1]+1)):
+                    if keys == list(range(keys[0], keys[-1] + 1)):
                         payload = b''.join(self.fragment_buffer[i] for i in keys) + payload
                     else:
                         self.logger.warning(f"Lost some packet from fragments, fragments was ignored")
@@ -485,8 +472,8 @@ class UDPServerProxy(asyncio.DatagramProtocol):
                 self.fragment_buffer = {}
 
                 try:
-                    self.bytes_sent += len(payload)
                     self.transport.sendto(payload, (dst_addr, dst_port))
+                    self.bytes_sent += len(payload)
                 except Exception as e:
                     self.logger.error(f"UDP sendto failed {dst_addr}:{dst_port}: {e}")
 
@@ -498,24 +485,7 @@ class UDPServerProxy(asyncio.DatagramProtocol):
         self.logger.debug(f"Remote->Client UDP: {len(payload)} bytes from {remote_ip}:{remote_port}")
 
         try:
-            ip_obj = None
-            atyp = 0x01
-            addr_bytes = b""
-            try:
-                ip_obj = socket.inet_pton(socket.AF_INET, remote_ip)
-                atyp = 0x01
-                addr_bytes = ip_obj
-            except OSError:
-                try:
-                    ip_obj6 = socket.inet_pton(socket.AF_INET6, remote_ip)
-                    atyp = 0x04
-                    addr_bytes = ip_obj6
-                except OSError:
-                    atyp = 0x03
-                    dom = remote_ip.encode("idna")
-                    if len(dom) > 255:
-                        dom = dom[:255]
-                    addr_bytes = bytes([len(dom)]) + dom
+            atyp, addr_bytes = encode_ip(remote_ip)
 
             if atyp == 0x01:
                 header = struct.pack("!HBB4sH", 0, 0, atyp, addr_bytes, remote_port)
@@ -524,11 +494,11 @@ class UDPServerProxy(asyncio.DatagramProtocol):
             else:  # domain
                 header = struct.pack("!HBB", 0, 0, atyp) + addr_bytes + struct.pack("!H", remote_port)
 
-            packet = ''.join(self.cipher.encrypt(packet))
+            payload = b''.join(self.cipher.encrypt(header + payload))
 
             if self.client_addr:
-                self.bytes_sent += len(packet)
-                self.transport.sendto(packet, self.client_addr)
+                self.bytes_received += len(payload)
+                self.transport.sendto(payload, self.client_addr)
 
         except Exception as e:
             self.logger.error(f"Failed to build SOCKS5 UDP reply: {e}")
@@ -612,7 +582,7 @@ class ConnectionMethods:
 
         try:
             transport, protocol = await loop.create_datagram_endpoint(
-                lambda: UDPServerProxy(server),
+                lambda: UDPServerProxy(server, user),
                 local_addr=('0.0.0.0', 0)
             )
         except Exception as e:

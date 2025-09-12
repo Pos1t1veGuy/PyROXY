@@ -4,6 +4,7 @@ import struct
 import asyncio
 import logging
 import ipaddress as ipa
+from functools import lru_cache
 
 from .base_wrapper import Wrapper
 
@@ -78,6 +79,49 @@ REPLYES_CODES = {
     "atype_not_supported": 0x08,
     "not_allowed": 0xFF,
 }
+
+
+@lru_cache(maxsize=10000)
+def fast_ipv4(data: bytes) -> str:
+    return str(ipa.IPv4Address(data))
+
+@lru_cache(maxsize=10000)
+def fast_ipv6(data: bytes) -> str:
+    return str(ipa.IPv6Address(data))
+
+@lru_cache(maxsize=10000)
+def resolve_domain(domain: str, port: int) -> tuple[str, int]:
+    infos = socket.getaddrinfo(domain, port, type=socket.SOCK_DGRAM)
+    for fam, *_rest, sockaddr in infos:
+        if fam in (socket.AF_INET, socket.AF_INET6):
+            return sockaddr[0], sockaddr[1]
+    raise ConnectionError(f"Cannot resolve {domain}")
+
+@lru_cache(maxsize=10000)
+def encode_ip(remote_ip: str) -> tuple[int, bytes]:
+    try:
+        return 0x01, socket.inet_pton(socket.AF_INET, remote_ip)
+    except OSError:
+        try:
+            return 0x04, socket.inet_pton(socket.AF_INET6, remote_ip)
+        except OSError:
+            dom = remote_ip.encode("idna")[:255]
+            return 0x03, bytes([len(dom)]) + dom
+
+def get_address(data: bytes, address_type: int) -> Tuple[str, int]:
+    match address_type:
+        case 0x01:  # IPv4
+            addr = fast_ipv4(data[:4])
+            port = int.from_bytes(data[4:6], 'big')
+        case 0x03:  # domain
+            addr = data[:-2].decode()
+            port = int.from_bytes(data[-2:], 'big')
+        case 0x04:  # IPv6
+            addr = fast_ipv6(data[:16])
+            port = int.from_bytes(data[16:18], 'big')
+        case _:
+            raise ConnectionError(f"Invalid address: {address_type}, it must be 0x01/0x03/0x04")
+    return addr, port
 
 
 class Cipher:
@@ -199,8 +243,7 @@ class Cipher:
                 raise ValueError("Domain name too long for SOCKS5")
             addr_part = struct.pack("!B", len(addr_bytes)) + addr_bytes
 
-        request = struct.pack("!BBBB", socks_version, user_command, 0x00, atyp) + addr_part + struct.pack("!H", target_port)
-        return request
+        return struct.pack("!BBBB", socks_version, user_command, 0x00, atyp) + addr_part + struct.pack("!H", target_port)
 
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
                              reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:
@@ -215,21 +258,16 @@ class Cipher:
 
         match address_type:
             case 0x01: # IPv4
-                addr_bytes = await reader.readexactly(4)
-                addr = '.'.join(map(str, addr_bytes))
+                addr_bytes = await reader.readexactly(4 + 2)
             case 0x03: # domain
                 domain_length = (await reader.readexactly(1))[0]
-                domain_bytes = await reader.readexactly(domain_length)
-                addr = domain_bytes.decode()
+                addr_bytes = await reader.readexactly(domain_length + 2)
             case 0x04: # IPv6
-                addr_bytes = await reader.readexactly(16)
-                addr = socket.inet_ntop(socket.AF_INET6, addr_bytes)
+                addr_bytes = await reader.readexactly(16 + 2)
             case _:
                 raise ConnectionError(f"Invalid address: {address_type}, it must be 0x01/0x03/0x04")
 
-        port_bytes = await reader.readexactly(2)
-        port = int.from_bytes(port_bytes, byteorder='big')
-        return addr, port, cmd
+        return *get_address(addr_bytes, address_type), cmd
 
     async def server_make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> List[bytes]:
         address_type = 0x01
