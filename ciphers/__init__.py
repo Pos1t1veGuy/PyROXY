@@ -125,7 +125,7 @@ class AES_CTR(Cipher):
     async def client_finish_handshake(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
         self._init_ciphers(await reader.readexactly(self.iv_length))
         return True
-
+#################
     async def client_command(self, socks_version: int, user_command: int, target_host: str, target_port: int) -> List[bytes]:
         try:
             ip = ipa.ip_address(target_host)
@@ -160,7 +160,7 @@ class AES_CTR(Cipher):
 
         match address_type:
             case 0x01:  # IPv4
-                addr_bytes = await reader.readexactly(4 + 2)
+                addr_bytes = b''.join(self.decrypt(await reader.readexactly(4 + 2)))
             case 0x03:  # domain
                 domain_len = b''.join(self.decrypt(await reader.readexactly(1)))[0]
                 addr_bytes = b''.join(self.decrypt(await reader.readexactly(domain_len + 2)))
@@ -323,13 +323,22 @@ class AES_CBC(Cipher):
 
         return True
 
+    async def server_finish_handshake(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
+        writer.write(self.iv)
+        await writer.drain()
+        return True
+
+    async def client_finish_handshake(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
+        self._init_ciphers(await reader.readexactly(self.iv_length))
+        return True
+
     async def client_command(self, socks_version: int, user_command: int, target_host: str, target_port: int) -> bytes:
         addr_bytes = b''
         atyp = 0x01
         length = 4
         try:
             ip = ipa.ip_address(target_host)
-            addr_part = ip.packed
+            addr_bytes = ip.packed
             if ip.version == 6:  # IPv6
                 atyp = 0x04
                 length = 16
