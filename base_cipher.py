@@ -227,6 +227,12 @@ class Cipher:
         except IndexError:
             raise ConnectionError(f'Invalid answer received {resp}')
 
+    async def server_finish_handshake(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
+        return True
+
+    async def client_finish_handshake(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
+        return True
+
     async def client_command(self, socks_version: int, user_command: int, target_host: str, target_port: int) -> bytes:
         try:
             ip = ipa.ip_address(target_host)

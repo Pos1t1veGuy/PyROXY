@@ -136,23 +136,14 @@ class Socks5Server:
             raise ConnectionError(f'Can not use authentication method {user} - {ms}')
 
         user.handshaked = True
-        if hasattr(cipher, 'key'):
-            if user.key:
-                key = user.key
-            elif not type(cipher) == Cipher:
-                key = cipher.key
-
-        kws = {}
-        if hasattr(default_cipher, 'iv') and hasattr(cipher, 'iv'):
-            kws['iv'] = default_cipher.iv
-        if hasattr(default_cipher, 'nonce') and hasattr(cipher, 'nonce'):
-            kws['nonce'] = default_cipher.nonce
-        cipher = cipher.__class__(key, **kws) if hasattr(cipher, 'key') else cipher.__class__(**kws)
-
-        cipher.is_handshaked = True
-        user.cipher = cipher
-        self.logger.debug(f'{user} is handshaked')
-        return user, cipher
+        cipher = cipher.__class__(user.key) if hasattr(cipher, 'key') and user.key else cipher.copy()
+        if await cipher.server_finish_handshake(reader, writer):
+            cipher.is_handshaked = True
+            user.cipher = cipher
+            self.logger.debug(f'{user} is handshaked')
+            return user, cipher
+        else:
+            raise ConnectionError(f'{user} refused a handshake')
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         client_ip, client_port = writer.get_extra_info("peername")

@@ -43,18 +43,11 @@ class Socks5Client:
         reader, writer = await asyncio.open_connection(proxy_host, proxy_port)
         try:
             cipher = self.ciphers[self.cipher_index]
+            if hasattr(cipher, 'key') and self.cipher_key:
+                cipher = cipher.__class__(self.cipher_key)
             default_cipher = self.ciphers[0].copy()
         except IndexError:
             raise IndexError(f'Invalid cipher index choosed: {self.cipher_index} of list {self.ciphers}')
-
-        if hasattr(cipher, 'key'):
-            if cipher.key != self.cipher_key and self.cipher_key != '':
-                kws = {}
-                if hasattr(default_cipher, 'iv') and hasattr(cipher, 'iv'):
-                    kws['iv'] = cipher.iv
-                if hasattr(default_cipher, 'nonce') and hasattr(cipher, 'nonce'):
-                    kws['nonce'] = cipher.nonce
-                cipher = cipher.__class__(self.cipher_key, **kws) if hasattr(cipher, 'key') else cipher.__class__(**kws)
 
         session = TCP_ProxySession(self, reader, writer, cipher, proxy_host, proxy_port,
                                    username=username, password=password, log_bytes=self.log_bytes)
@@ -100,9 +93,12 @@ class Socks5Client:
             else:
                 raise ConnectionError(f"Unsupported authentication method selected by proxy: {method_chosen}")
 
-            self.logger.debug("Handshaked")
-            session.cipher.is_handshaked = True
-            return session
+            if await session.cipher.client_finish_handshake(reader, writer):
+                self.logger.debug("Handshaked")
+                session.cipher.is_handshaked = True
+                return session
+            else:
+                raise ConnectionError(f'{user} refused a handshake')
         except Exception as ex:
             self.logger.error(ex)
             raise ex
