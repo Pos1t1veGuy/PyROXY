@@ -221,6 +221,7 @@ class Socks5Server:
             buffer = bytearray()
             while not reader.at_eof():
                 data = await asyncio.wait_for(reader.read(4096), timeout=timeout)
+                # print(name, 'received', len(data), 'bytes:', data)
                 if not data:
                     break
                 bytes_received += len(data)
@@ -231,6 +232,7 @@ class Socks5Server:
                     data = decrypt(data)
                 if encrypt:
                     data = encrypt(data)
+                # print(name, 'encrypted to' if encrypt else 'decrypted to', len(data), 'bytes:', data)
 
                 for frame in data:
                     writer.write(frame)

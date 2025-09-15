@@ -326,10 +326,12 @@ class AES_CBC(Cipher):
     async def server_finish_handshake(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
         writer.write(self.iv)
         await writer.drain()
+        # print(self.key, self.iv)
         return True
 
     async def client_finish_handshake(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
         self._init_ciphers(await reader.readexactly(self.iv_length))
+        # print(self.key, self.iv)
         return True
 
     async def client_command(self, socks_version: int, user_command: int, target_host: str, target_port: int) -> bytes:
