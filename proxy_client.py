@@ -5,7 +5,6 @@ import logging
 import ipaddress
 import struct
 import time
-import traceback as tb
 
 from .logger_setup import *
 from .base_cipher import Cipher, REPLYES_CODES
@@ -556,7 +555,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
                 proxy_host=self.remote_host, proxy_port=self.remote_port, username=self.username, password=self.password
             )
         except ConnectionRefusedError:
-            self.logger.error(f"The server is not started {self.remote_host}:{self.remote_port}")
+            self.logger.error(f"Can not connect to remote proxy {self.remote_host}:{self.remote_port}")
             client_writer.close()
             await client_writer.wait_closed()
             return
@@ -629,13 +628,41 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
             try:
                 await asyncio.gather(
-                    self.pipe(self, client_reader, remote_session.writer, encrypt=remote_session.cipher.encrypt,
-                              name='client -> server'),
-                    self.pipe(self, remote_session.reader, client_writer, decrypt=remote_session.cipher.decrypt,
-                              name='client <- server'),
+                    self.pipe(self, client_reader, remote_session.writer, encrypt=remote_session.cipher.encrypt, name='client -> server'),
+                    self.pipe(self, remote_session.reader, client_writer, decrypt=remote_session.cipher.decrypt, name='client <- server'),
                 )
             except (ConnectionResetError, OSError):
                 pass
+
+            try:
+                t1 = asyncio.create_task(self.pipe(self, client_reader, remote_session.writer,
+                                                   encrypt=remote_session.cipher.encrypt, name='client -> server'))
+                t2 = asyncio.create_task(self.pipe(self, remote_session.reader, client_writer,
+                                                   decrypt=remote_session.cipher.decrypt, name='client <- server'))
+                done, pending = await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
+            except (ConnectionResetError, OSError):
+                pass
+
+            for t in pending:
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+
+            c2s_bytes = [0, 0]
+            s2c_bytes = [0, 0]
+
+            if t1.done():
+                try:
+                    c2s_bytes = t1.result()
+                except asyncio.CancelledError:
+                    pass
+            if t2.done():
+                try:
+                    s2c_bytes = t2.result()
+                except asyncio.CancelledError:
+                    pass
             self.logger.debug(f"TCP connection to {addr}:{port} is closed")
 
 
@@ -655,7 +682,6 @@ class Socks5_TCP_Retranslator(Socks5Client):
                     self.remote_host, port, self.udp_cipher
                 )
             except Exception as e:
-                tb.print_stack()
                 self.logger.error(f"Failed to start UDP relay: {e}")
                 reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0)
                 for r in reply:
