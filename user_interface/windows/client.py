@@ -39,7 +39,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="PyROXY - makes encrypted connection to pyroxy socks5 server with selested user cipher and wrapper"
     )
-    ciphers_choices = ["none", "aes_ctr", "aes_cbc", "chacha20", "default"]
+    ciphers_choices = ["none", "aes_ctr", "chacha20", "default"]
     logging_levels = ['info', 'debug', 'warning', 'error']
 
     parser.add_argument("--host", required=True, help="PyROXY server host")
@@ -100,7 +100,6 @@ def main():
     available_ciphers = [
         Cipher(wrapper=HTTP_WS_Wrapper()),  # starts a handshake with client_hello and server_hello from wrapper
         AES_CTR(key=default_key, iv=os.urandom(16)),
-        AES_CBC(key=default_key, iv=os.urandom(16)),
         ChaCha20_Poly1305(key=default_key),
         Cipher(), # without wrapper
     ]

@@ -48,7 +48,6 @@ key = bytes.fromhex(open(key_file, 'r').read())
 
 available_ciphers = [
     Cipher(wrapper=HTTP_WS_Wrapper()), # starts a handshake with client_hello and server_hello from wrapper
-    AES_CBC(key=key, iv=os.urandom(16)),
     AES_CTR(key=key, iv=os.urandom(16)),
     ChaCha20_Poly1305(key=key),
     Cipher()

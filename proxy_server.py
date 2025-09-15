@@ -201,8 +201,8 @@ class Socks5Server:
             else:
                 self.logger.warning(f'Suspicious client tried to connect: {user}')
 
-        except Exception as e:
-            self.logger.error(f"Connection error: {repr(e)}")
+        # except Exception as e:
+        #     self.logger.error(f"Connection error: {repr(e)}")
 
         finally:
             alive_time = time.time() - connection_start_time

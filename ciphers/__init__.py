@@ -219,7 +219,7 @@ class AES_CTR(Cipher):
             raise OSError(f'{self.__class__.__name__} needs to specify IV (init vector) in constructor or handshake')
 
 
-class AES_CBC(Cipher):
+class AES_CBC(Cipher): # ДОДЕЛАТЬ ЭТО ДЕРЬМИЩЕ!!!!!!!!!!
     def __init__(self, key: bytes, iv: Optional[bytes] = None, iv_length: int = 16, **kwargs):
         self.iv = iv if iv else os.urandom(16)
         self.key = key
@@ -227,6 +227,12 @@ class AES_CBC(Cipher):
         self.iv_length = iv_length
         self.encryptor = None
         self.decryptor = None
+
+        self.blocks_count = 0
+        self._meta_bytes_buffer = b''
+        # every encrypted message contains first 16 meta bytes. If we have less, put bytes here
+        self._blocks_bytes_buffer = b''
+        # self._meta_bytes_buffer contains a count of a blocks in ONE message. If we have less, put bytes here
 
         self._init_ciphers(self.iv)
 
@@ -349,18 +355,18 @@ class AES_CBC(Cipher):
             if length > 255:
                 raise ValueError("Domain name too long for SOCKS5")
 
-        first_block = self.encrypt(
-            struct.pack("!BBBBB", socks_version, user_command, 0x00, atyp, length)
+        return self.encrypt(
+            struct.pack("!BBBBB", socks_version, user_command, 0x00, atyp, length) + addr_bytes + struct.pack("!H", target_port)
         )
-        second_block = self.encrypt(addr_bytes + struct.pack("!H", target_port))
-        return first_block + second_block
 
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
                                         reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:
 
-        header_raw = await reader.readexactly(AES.block_size)
-        header = b''.join(self.decrypt(header_raw))
-        version, cmd, rsv, address_type, length = struct.unpack("!BBBBB", header[:5])
+        data = b''.join(self.decrypt(await reader.readexactly(AES.block_size)))
+        for _ in range(self.blocks_count): # CBC decrypt makes self.blocks_count
+            data += b''.join(self.decrypt(await reader.readexactly(AES.block_size)))
+
+        version, cmd, rsv, address_type, length = struct.unpack("!BBBBB", data[:5])
         if version != socks_version:
             raise ConnectionError(f"Unsupported SOCKS version: {version}")
 
@@ -368,18 +374,7 @@ class AES_CBC(Cipher):
             raise ConnectionError(f"Unsupported command: {cmd}, it must be one of {list(user_command_handlers.keys())}")
         cmd = user_command_handlers[cmd]
 
-        match address_type:
-            case 0x01:  # IPv4
-                addr_bytes = b''.join(self.decrypt(await reader.readexactly(AES.block_size)))
-            case 0x03:  # domain
-                padded_len = ((length + 2 + 15) // AES.block_size) * AES.block_size
-                addr_bytes = b''.join(self.decrypt(await reader.readexactly(padded_len)))
-            case 0x04:  # IPv6
-                addr_bytes = b''.join(self.decrypt(await reader.readexactly(2*16)))
-            case _:
-                raise ConnectionError(f"Invalid address: {address_type}, it must be 0x01/0x03/0x04")
-
-        return *get_address(addr_bytes, address_type), cmd
+        return *get_address(data[5:], address_type), cmd
 
     async def server_make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> bytes:
         address_type = 0x01
@@ -406,82 +401,77 @@ class AES_CBC(Cipher):
             address_type = 0x01
             port = 0
 
-        first_header = struct.pack(
-            "!BBBB",
+        return self.encrypt(struct.pack(
+            f"!BBBB{length}sH",
             socks_version,
             reply_code,
             0x00,  # RSV
-            address_type
-        )
-        second_header = struct.pack(
-            f"!{length}sH",
+            address_type,
             addr_data,
             port
-        )
-        return self.encrypt(first_header) + self.encrypt(second_header)
+        ))
 
     async def client_connect_confirm(self, reader: asyncio.StreamReader) -> Tuple[str, str]:
-        header_encrypted = await reader.readexactly(AES.block_size)
-        header = b''.join(self.decrypt(header_encrypted))
+        data = b''.join(self.decrypt(await reader.readexactly(AES.block_size)))
+        for _ in range(self.blocks_count): # CBC decrypt makes self.blocks_count
+            data += b''.join(self.decrypt(await reader.readexactly(AES.block_size)))
 
-        ver, rep, _, atyp = header
+        ver, rep, _, atyp = data[:4]
         if ver != 0x05:
             raise ConnectionError(f"Invalid SOCKS version in reply: {ver}")
         if rep != 0x00:
             raise ConnectionError(f"SOCKS5 CONNECT failed {REPLYES[rep]}")
 
-        match atyp:
-            case 0x01:  # IPv4
-                addr_port = b''.join(self.decrypt(await reader.readexactly(AES.block_size)))
-                addr_bytes, port_bytes = addr_port[:4], addr_port[4:6]
-                address = socket.inet_ntoa(addr_bytes)
-
-            case 0x03:  # Domain
-                padded = ((1 + len(addr_bytes) + 2 + AES.block_size - 1) // AES.block_size) * AES.block_size
-                addr_port = b''.join(self.decrypt(await reader.readexactly(padded)))
-                domain_len = addr_port[0]
-                addr_bytes = addr_port[1:1 + domain_len]
-                port_bytes = addr_port[1 + domain_len:1 + domain_len + 2]
-                address = addr_bytes.decode('idna')
-
-            case 0x04:  # IPv6
-                addr_port = b''.join(self.decrypt(await reader.readexactly(math.ceil(2*16))))
-                addr_bytes, port_bytes = addr_port[:16], addr_port[16:]
-                address = socket.inet_ntop(socket.AF_INET6, addr_bytes)
-
-            case _:
-                raise ConnectionError(f"Invalid ATYP in reply: {atyp}")
-
-        return address, struct.unpack('!H', port_bytes)[0]
+        return tuple(get_address(data[4:], atyp))
 
 
-    def encrypt(self, data: bytes, return_blocks: bool = False) -> List[bytes]:
-        res_blocks = []
-        res_bytes = bytearray()
+    def encrypt(self, data: bytes) -> List[bytes]:
         length = len(data)
+        blocks_count = math.ceil(length / 16)
+        res_blocks = [blocks_count.to_bytes(AES.block_size, 'big')] # first 16 bytes is a count of blocks in one message
+
+        if length % AES.block_size == 0:
+            blocks_count += 1
+
         for i, chunk_start in enumerate(range(0, length, AES.block_size)):
             chunk = data[chunk_start:chunk_start + AES.block_size]
             if (i+1)*AES.block_size >= length:
                 chunk = pad(chunk, AES.block_size)
+            res_blocks.append(self.wrapper.wrap(self.encryptor.encrypt(chunk)))
 
-            if return_blocks:
-                res_blocks.append(self.encryptor.encrypt(chunk))
-            else:
-                res_bytes.extend(self.encryptor.encrypt(chunk))
-
-        if return_blocks:
-            return self.wrapper.wrap(res_blocks[0]) + res_blocks[1:]
-        else:
-            return [self.wrapper.wrap(res_bytes)]
+        return res_blocks
 
     def decrypt(self, data: bytes) -> List[bytes]:
-        data = self.wrapper.unwrap(data)
-        res = []
-        for chunk_start in range(0, len(data), AES.block_size):
-            chunk = data[chunk_start:chunk_start + AES.block_size]
-            res.append(self.decryptor.decrypt(chunk))
-        res[-1] = unpad(res[-1], AES.block_size)
-        return res
+        res_blocks = []
+
+        meta_buf_len = len(self._meta_bytes_buffer)
+        if meta_buf_len < 16:
+            self._meta_bytes_buffer += data[:16 - meta_buf_len]
+            data = data[16 - meta_buf_len:]
+
+        if len(self._meta_bytes_buffer) == 16 and self.blocks_count == 0:
+            self.blocks_count = int.from_bytes(self._meta_bytes_buffer, 'big')
+
+        if len(data) > 0:
+            if self.blocks_count:
+                data = self._blocks_bytes_buffer + data
+                while len(data) >= AES.block_size and self.blocks_count > 0:
+                    chunk = data[:AES.block_size]
+                    data = data[AES.block_size:]
+                    res_blocks.append(self.decryptor.decrypt(self.wrapper.unwrap(chunk)))
+                    self.blocks_count -= 1
+
+                if self.blocks_count <= 0:
+                    res_blocks[-1] = unpad(res_blocks[-1], AES.block_size)
+                    self._meta_bytes_buffer = b''
+                    self._blocks_bytes_buffer = b''
+                    self.blocks_count = 0
+
+                return res_blocks
+            else:
+                self._blocks_bytes_buffer += data
+
+        return []
 
 
 class ChaCha20_Poly1305(Cipher):
