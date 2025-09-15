@@ -172,7 +172,7 @@ class Socks5Server:
             client_alive_time_score = 0
 
         client_score = client_connections_score - client_alive_time_score
-        print('score', client_score)
+        # print('score', client_score)
 
         user = await self.add_user(client_ip, client_port, writer)
         logging.debug(f'{user} is connecting...')

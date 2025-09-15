@@ -14,7 +14,7 @@ SOCKS5 HANDSHAKE STRUCTURE (client and server):
 
 The ciphers encrypt the handshake using several methods and the main data stream.
 To establish a SOCKS5 connection, both the client and server must follow a specific HANDSHAKE protocol,
-which typically consists of 4–5 stages. This class defines symmetric methods for both parties.
+which typically consists of 4–7 stages. This class defines symmetric methods for both parties.
 
 ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
 [ CLIENT SIDE ]                         [ SERVER SIDE ]
@@ -28,14 +28,17 @@ which typically consists of 4–5 stages. This class defines symmetric methods f
 2. client_get_method ←                ← server_send_method_to_user
    - Server selects an auth method and responds.
 
-3. client_auth_userpass →             → server_auth_userpass
+3. server_finish_handshake →             → client_finish_handshake
+   - *Custom end of a handshake
+
+4. client_auth_userpass →             → server_auth_userpass
    - If selected method is username/password (0x02), client authenticates.
 
-4. client_command →                   → server_handle_command
+5. client_command →                   → server_handle_command
    - Client requests to CONNECT, BIND or ASSOCIATE (usually 0x01 = TCP connect),
      and provides destination address and port.
 
-5. client_connect_confirm ←           ← server_make_reply
+6. client_connect_confirm ←           ← server_make_reply
    - Server replies with success or failure and bound address/port.
 
 ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
@@ -46,12 +49,13 @@ All further traffic is sent over this tunnel.
 After that:
 - `encrypt(data)` and `decrypt(data)` are used to optionally obfuscate or secure traffic.
 - These can be customized (e.g., with XOR, AES, session keys, etc.) to implement encryption
-  or detection evasion mechanisms similar to obfs4 or ShadowSocks.
+  or detection evasion mechanisms similar to obfs4 or ShadowSocks. Functions returns a package
+  list.
 
 Each `Cipher` subclass must implement or override:
 - Handshake stages (client and/or server side)
-- `encrypt(data: bytes) -> bytes`
-- `decrypt(data: bytes) -> bytes`
+- `encrypt(data: bytes) -> List[bytes]`
+- `decrypt(data: bytes) -> List[bytes]`
 '''
 
 
@@ -99,14 +103,19 @@ def resolve_domain(domain: str, port: int) -> tuple[str, int]:
 
 @lru_cache(maxsize=10000)
 def encode_ip(remote_ip: str) -> tuple[int, bytes]:
-    try:
-        return 0x01, socket.inet_pton(socket.AF_INET, remote_ip)
-    except OSError:
+    if '.' in remote_ip:
+        try:
+            return 0x01, socket.inet_pton(socket.AF_INET, remote_ip)
+        except OSError:
+            pass
+    if ':' in remote_ip:
         try:
             return 0x04, socket.inet_pton(socket.AF_INET6, remote_ip)
         except OSError:
-            dom = remote_ip.encode("idna")[:255]
-            return 0x03, bytes([len(dom)]) + dom
+            pass
+
+    dom = remote_ip.encode("idna")[:255]
+    return 0x03, bytes([len(dom)]) + dom
 
 def get_address(data: bytes, address_type: int) -> Tuple[str, int]:
     match address_type:
