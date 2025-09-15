@@ -201,8 +201,8 @@ class Socks5Server:
             else:
                 self.logger.warning(f'Suspicious client tried to connect: {user}')
 
-        except Exception as e:
-            self.logger.error(f"Connection error: {repr(e)}")
+        # except Exception as e:
+        #     self.logger.error(f"Connection error: {repr(e)}")
 
         finally:
             alive_time = time.time() - connection_start_time
@@ -243,8 +243,8 @@ class Socks5Server:
             pass
         except asyncio.CancelledError:
             pass
-        except Exception as e:
-            self.logger.error(f"Proxying PIPE '{name}' error: {repr(e)}")
+        # except Exception as e:
+        #     self.logger.error(f"Proxying PIPE '{name}' error: {repr(e)}")
         finally:
             await self.close_writer(writer)
 

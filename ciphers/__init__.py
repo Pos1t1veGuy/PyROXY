@@ -455,30 +455,33 @@ class AES_CBC(Cipher):
         return address, struct.unpack('!H', port_bytes)[0]
 
 
-    def encrypt(self, data: bytes) -> List[bytes]:
-        if not self.encryptor is None:
-            res = []
-            length = len(data)
-            for i, chunk_start in enumerate(range(0, length, AES.block_size)):
-                chunk = data[chunk_start:chunk_start + AES.block_size]
-                if (i+1)*AES.block_size >= length:
-                    chunk = pad(chunk, AES.block_size)
-                res.append(self.encryptor.encrypt(chunk))
-            return self.wrapper.wrap(res)
+    def encrypt(self, data: bytes, return_blocks: bool = False) -> List[bytes]:
+        res_blocks = []
+        res_bytes = bytearray()
+        length = len(data)
+        for i, chunk_start in enumerate(range(0, length, AES.block_size)):
+            chunk = data[chunk_start:chunk_start + AES.block_size]
+            if (i+1)*AES.block_size >= length:
+                chunk = pad(chunk, AES.block_size)
+
+            if return_blocks:
+                res_blocks.append(self.encryptor.encrypt(chunk))
+            else:
+                res_bytes.extend(self.encryptor.encrypt(chunk))
+
+        if return_blocks:
+            return self.wrapper.wrap(res_blocks[0]) + res_blocks[1:]
         else:
-            raise OSError(f'{self.__class__.__name__} needs to specify IV (init vector) in constructor or handshake')
+            return [self.wrapper.wrap(res_bytes)]
 
     def decrypt(self, data: bytes) -> List[bytes]:
         data = self.wrapper.unwrap(data)
-        if not self.decryptor is None:
-            res = []
-            for chunk_start in range(0, len(data), AES.block_size):
-                chunk = data[chunk_start:chunk_start + AES.block_size]
-                res.append(self.decryptor.decrypt(chunk))
-            res[-1] = unpad(res[-1], AES.block_size)
-            return res
-        else:
-            raise OSError(f'{self.__class__.__name__} needs to specify IV (init vector) in constructor or handshake')
+        res = []
+        for chunk_start in range(0, len(data), AES.block_size):
+            chunk = data[chunk_start:chunk_start + AES.block_size]
+            res.append(self.decryptor.decrypt(chunk))
+        res[-1] = unpad(res[-1], AES.block_size)
+        return res
 
 
 class ChaCha20_Poly1305(Cipher):
