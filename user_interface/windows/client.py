@@ -14,6 +14,8 @@ from pyroxy.wrappers import HTTP_WS_Wrapper
 from pyroxy.tunnel import Tun2Socks
 
 
+APP_VERSION = '1.0.0'
+
 
 def make_log(filename: str):
     log_file = Path(__file__).parent / 'logs' / filename
@@ -41,6 +43,12 @@ def main():
     )
     ciphers_choices = ["none", "aes_ctr", "chacha20", "default"]
     logging_levels = ['info', 'debug', 'warning', 'error']
+
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=APP_VERSION
+    )
 
     parser.add_argument("--host", required=True, help="PyROXY server host")
     parser.add_argument("--port", type=int, default=80, help="PyROXY server port (by default 80)")
