@@ -5,17 +5,11 @@ import os
 import struct
 import socket
 import time
-from collections import deque
 
 from .logger_setup import *
 from .base_cipher import Cipher, REPLYES_CODES, get_address, resolve_domain, encode_ip
 from .db_handlers import SQLite_Handler
 
-
-MAX_PAYLOAD_UDP = 65535
-SHORT_PERIOD_OF_TIME = 10 # sec
-CONN_ALIVE_MAX_NUMS = 50
-CONNCETIONS_THRESHOLD = 100
 
 
 class Socks5Server:
@@ -25,7 +19,9 @@ class Socks5Server:
                  users_black_list: Optional[Set[str]] = None,
                  ciphers: List[Cipher] = [Cipher()],
                  udp_cipher: Optional[Cipher] = None,
-                 udp_server_timeout: int = 5*60,
+                 udp_server_timeout: int = 60,
+                 max_udp_for_user: int = 20,
+                 max_udp_payload: int = 65535,
                  db_handler: Optional['Handler'] = None,
                  user_commands: Optional[Dict[bytes, callable]] = None,
                  accept_anonymous: bool = False,
@@ -42,12 +38,14 @@ class Socks5Server:
         self.users_black_list = users_black_list
         self.log_bytes = log_bytes # only after handshake
         self.udp_server_timeout = udp_server_timeout
+        self.max_udp_for_user = max_udp_for_user
+        self.max_udp_payload = max_udp_payload
         self.ciphers = ciphers
         self.db_handler = db_handler
         self.udp_cipher = Cipher() if udp_cipher is None else udp_cipher
         self.logger = logging.getLogger(__name__)
 
-        self.clients_udp_servers: Dict[str, str] = {}
+        self.clients_udp_servers: Dict[str, int] = {}
 
         for cipher in self.ciphers:
             cipher.is_server = True
@@ -90,6 +88,13 @@ class Socks5Server:
             self.logger.info("Server is closed")
 
 
+    async def trace_event(self, coro: Awaitable, event_name: str, ex_class: Exception = ConnectionError):
+        try:
+            return await coro
+        except Exception as ex:
+            raise ex_class(f'Error when {event_name}: "{ex}"')
+
+
     async def handshake(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                         cipher: 'Cipher', default_cipher: 'Cipher', user: Optional['User'] = None) -> 'User':
         if user is None:
@@ -97,24 +102,28 @@ class Socks5Server:
             user = await self.add_user(client_ip, client_port, writer)
 
         self.logger.debug('The server getting an auth methods')
-        methods = await default_cipher.server_get_methods(self.socks_version, reader)
+        methods = await self.trace_event(
+            default_cipher.server_get_methods(self.socks_version, reader),
+            event_name='GETTING_AUTH_METHODS'
+        )
 
         if methods['supports_no_auth'] and self.accept_anonymous:
             self.logger.debug(f'{user} authorizing as Anonynous')
             data = await default_cipher.server_send_method_to_user(self.socks_version, 0x00)
-            await self.send(user, data, log_bytes=False)
+            await self.trace_event(self.send(user, data, log_bytes=False), event_name=f'SEND_AUTH_METHOD')
         elif methods['supports_user_pass']:
             self.logger.debug(f'{user} authorizing with username:password')
             data = await default_cipher.server_send_method_to_user(self.socks_version, 0x02)
-            await self.send(user, data, log_bytes=False)
+            await self.trace_event(self.send(user, data, log_bytes=False), event_name=f'SEND_AUTH_METHOD')
 
             self.logger.debug('The server is authorizing the client')
-            auth_data = await default_cipher.server_auth_userpass(self.db_handler, reader, writer)
+            auth_data = await self.trace_event(default_cipher.server_auth_userpass(self.db_handler, reader, writer),
+                                               event_name=f'AUTH')
 
             user.username, user.password, user.key = auth_data
         else:
             data = await default_cipher.server_send_method_to_user(self.socks_version, 0xFF)
-            await self.send(user, data, log_bytes=False)
+            await self.trace_event(self.send(user, data, log_bytes=False), event_name=f'SEND_AUTH_METHOD')
             ms = ", ".join([m for m, enabled in methods.items() if enabled])
             raise ConnectionError(f'Can not use authentication method {user} - {ms}')
 
@@ -144,10 +153,11 @@ class Socks5Server:
         default_cipher = self.ciphers[0].copy()
 
         try:
-            if await default_cipher.server_hello(self, reader, writer):
+            if await self.trace_event(default_cipher.server_hello(self, reader, writer), event_name=f'SERVER_HELLO'):
                 self.logger.debug(f"Sent server_hello of {default_cipher.wrapper.__class__.__name__}")
                 try:
-                    cipher = await default_cipher.server_get_cipher(self, self.ciphers, reader, writer)
+                    cipher = await self.trace_event(default_cipher.server_get_cipher(self, self.ciphers, reader, writer),
+                                                    event_name=f'GETTING_CIPHER')
                     self.logger.debug(f"Client choosed a cipher {cipher.__class__.__name__}")
                     user, cipher = await self.handshake(reader, writer, cipher, default_cipher, user=user)
                 except ConnectionError as e:
@@ -155,15 +165,39 @@ class Socks5Server:
                     return
 
                 self.logger.info(f"{user} is connected with cipher {cipher.__class__.__name__}")
-                addr, port, command = await cipher.server_handle_command(
-                    self.socks_version, self.user_commands, reader
+                addr, port, command = await self.trace_event(
+                    cipher.server_handle_command(self.socks_version, self.user_commands, reader),
+                    event_name=f'HANDLE_CLIENT_CMD'
                 )
                 self.logger.info(f'Client {user} sent command {command.__qualname__} to {addr}:{port}')
 
                 if command == ConnectionMethods.UDP_ASSOCIATE:
-                    ...
+                    if user.username in self.clients_udp_servers.keys():
+                        if self.clients_udp_servers[user.username] >= self.max_udp_for_user:
+                            self.logger.warning(f"Too many UDP connections for {addr}:{port} - {self.max_udp_for_user}")
+                            reply_frames = await self.trace_event(
+                                cipher.server_make_reply(self.socks_version, REPLYES_CODES['not_allowed'], '0.0.0.0', 0),
+                                event_name=f'CMD_CONFIRM'
+                            )
+                            writer.write(b''.join(reply_frames))
+                            await writer.drain()
+                            self.logger.info('Сompleted the operation successfully, code: 1')
+                            return
 
-                result_code, traffic_stats = await command(self, addr, port, user, cipher, reader, writer)
+                        self.clients_udp_servers[user.username] += 1
+                    else:
+                        self.clients_udp_servers[user.username] = 1
+
+                result_code, traffic_stats = await self.trace_event(
+                    command(self, addr, port, user, cipher, reader, writer),
+                    event_name=f'RUNNING_CLIENT_CMD'
+                )
+
+                if command == ConnectionMethods.UDP_ASSOCIATE and user.username in self.clients_udp_servers.keys():
+                    if self.clients_udp_servers[user.username] <= 1:
+                        self.clients_udp_servers.pop(user.username)
+                    else:
+                        self.clients_udp_servers[user.username] -= 1
                 self.logger.info(f'Сompleted the operation successfully, code: {result_code}')
 
             else:
@@ -362,7 +396,7 @@ class UDPServerProxy(asyncio.DatagramProtocol):
             if self.client_addr is None:
                 self.client_addr = addr
 
-            if len(data) <= MAX_PAYLOAD_UDP:
+            if len(data) <= self.tcp_server.max_udp_payload:
                 if addr == self.client_addr:
                     self.handle_client(data, addr)
                 else:
@@ -478,12 +512,18 @@ class ConnectionMethods:
         try:
             remote_reader, remote_writer = await asyncio.open_connection(addr, port)
             local_ip, local_port = remote_writer.get_extra_info("sockname")
-            reply_frames = await cipher.server_make_reply(server.socks_version, REPLYES_CODES['succeeded'], local_ip, local_port)
+            reply_frames = await server.trace_event(
+                cipher.server_make_reply(server.socks_version, REPLYES_CODES['succeeded'], local_ip, local_port),
+                event_name=f'CMD_CONFIRM'
+            )
             client_writer.write(b''.join(reply_frames))
             await client_writer.drain()
         except Exception as e:
             server.logger.warning(f"Failed to connect to {addr}:{port} => {e}")
-            reply_frames = await cipher.server_make_reply(server.socks_version, REPLYES_CODES['host_unreachable'], '0.0.0.0', 0)
+            reply_frames = await server.trace_event(
+                cipher.server_make_reply(server.socks_version, REPLYES_CODES['host_unreachable'], '0.0.0.0', 0),
+                event_name=f'CMD_CONFIRM'
+            )
             client_writer.write(b''.join(reply_frames))
             await client_writer.drain()
             return 1, [0,0]
@@ -541,8 +581,11 @@ class ConnectionMethods:
             )
         except Exception as e:
             server.logger.error(f"Failed to start UDP relay: {e}")
-            reply = b''.join(await cipher.server_make_reply(server.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0))
-            client_writer.write(reply)
+            reply = await server.trace_event(
+                default_cipher.server_make_reply(self.socks_version, 0xFF, '0.0.0.0', 0),
+                event_name=f'CMD_CONFIRM'
+            )
+            client_writer.write(b''.join(reply))
             await client_writer.drain()
             return 1, [0,0]
 
@@ -550,13 +593,19 @@ class ConnectionMethods:
         server.logger.info(f"Started UDP server for {addr}:{port} at {udp_host}:{udp_port}")
 
         try:
-            reply = b''.join(await cipher.server_make_reply(server.socks_version, REPLYES_CODES['succeeded'], udp_host, udp_port))
-            client_writer.write(reply)
+            reply = await server.trace_event(
+                cipher.server_make_reply(server.socks_version, REPLYES_CODES['succeeded'], udp_host, udp_port),
+                event_name=f'CMD_CONFIRM'
+            )
+            client_writer.write(b''.join(reply))
             await client_writer.drain()
         except Exception as e:
             self.logger.warning(f"Failed to make UDP connection at TCP {addr}:{port}; UDP {udp_host}:{udp_port} => {e}")
-            reply = b''.join(await default_cipher.server_make_reply(self.socks_version, 0xFF, '0.0.0.0', 0))
-            client_writer.write(reply)
+            reply = await server.trace_event(
+                default_cipher.server_make_reply(self.socks_version, 0xFF, '0.0.0.0', 0),
+                event_name=f'CMD_CONFIRM'
+            )
+            client_writer.write(b''.join(reply))
             await client_writer.drain()
             return 1, [0,0]
 

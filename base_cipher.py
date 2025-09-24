@@ -74,7 +74,6 @@ REPLYES = {
 REPLYES_CODES = {
     "succeeded": 0x00,
     "failure": 0x01,
-    "not_allowed": 0x02,
     "network_unreachable": 0x03,
     "host_unreachable": 0x04,
     "refused": 0x05,
