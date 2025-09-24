@@ -14,7 +14,7 @@ from pyroxy.wrappers import HTTP_WS_Wrapper
 from pyroxy.tunnel import Tun2Socks
 
 
-APP_VERSION = '1.0.1'
+APP_VERSION = '1.0.2'
 
 
 def make_log(filename: str):
