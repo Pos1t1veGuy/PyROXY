@@ -16,6 +16,9 @@ logging_levels = ['info', 'debug', 'warning', 'error']
 logging_levels += [level.upper() for level in logging_levels]
 parser.add_argument("--logging", choices=logging_levels, default='info', help="logging level")
 parser.add_argument("--hosting", type=int, choices=[1,0], default=1, help="hosting mode")
+parser.add_argument("--host", type=str, default='127.0.0.1', help="TCP host")
+parser.add_argument("--udp_host", type=str, default='0.0.0.0', help="UDP host")
+parser.add_argument("--port", type=int, default=8080, help="proxy server port")
 args = parser.parse_args()
 
 
@@ -56,11 +59,15 @@ SERVER = Socks5Server(
     db_handler=SQLite_Handler(filepath=db_file),
     ciphers=available_ciphers,
     udp_cipher=available_ciphers[2].copy(),
-    port=80,
-    host='0.0.0.0',
+    port=args.port,
+    host=args.host,
+    udp_host=args.udp_host,
 )
 
 SERVER.logger.setLevel(getattr(logging, args.logging.upper(), logging.INFO))
 
 SERVER.logger.addHandler(file_handler)
-asyncio.run(SERVER.start())
+try:
+    asyncio.run(SERVER.start())
+except KeyboardInterrupt:
+    SERVER.logger.info('Server closed')

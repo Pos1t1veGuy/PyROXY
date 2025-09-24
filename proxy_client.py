@@ -68,9 +68,13 @@ class Socks5Client:
 
         self.logger.debug("Sent auth methods")
         methods_msg = await default_cipher.client_send_methods(self.socks_version, methods)
-        await session.asend(methods_msg, encrypt=False, log_bytes=False)
+
+        await self.trace_event(session.asend(methods_msg, encrypt=False, log_bytes=False), event_name=f'CLIENT_HELLO')
         self.logger.debug("Receiving server auth method")
-        method_chosen = await default_cipher.client_get_method(self.socks_version, reader)
+        method_chosen = await self.trace_event(
+            default_cipher.client_get_method(self.socks_version, reader),
+            event_name=f'GETTING_AUTH_METHODS'
+        )
 
         try:
             if method_chosen == 0xFF:
@@ -81,7 +85,10 @@ class Socks5Client:
                     raise ConnectionError("Proxy requires username/password authentication, but none provided")
 
                 self.logger.debug("Client is authorizing")
-                auth_ok = await default_cipher.client_auth_userpass(username, password, reader, writer)
+                auth_ok = await self.trace_event(
+                    default_cipher.client_auth_userpass(username, password, reader, writer),
+                    event_name='AUTH'
+                )
                 if not auth_ok:
                     raise ConnectionError("Authentication failed")
                 self.logger.info("Authenticated successfully")
@@ -110,11 +117,16 @@ class Socks5Client:
         session = await self.handshake(proxy_host=proxy_host, proxy_port=proxy_port,
                                            username=username, password=password)
 
+
         cmd_bytes = await session.cipher.client_command(
             self.socks_version, self.user_commands['connect'], target_host, target_port
         )
-        await session.asend(cmd_bytes, encrypt=False, log_bytes=False)
-        address, port = await session.cipher.client_connect_confirm(session.reader)
+        await self.trace_event(session.asend(cmd_bytes, encrypt=False, log_bytes=False), event_name=f'CLIENT_CMD_SEND')
+
+        address, port = await self.trace_event(
+            session.cipher.client_connect_confirm(session.reader),
+            event_name=f'SERVER_CMD_CONFIRM'
+        )
 
         self.logger.debug(f"Connected to {target_host}:{target_port} through proxy")
         return session
@@ -130,12 +142,23 @@ class Socks5Client:
         cmd_bytes = await session.cipher.client_command(
             self.socks_version, self.user_commands['associate'], target_host, target_port
         )
-        await session.asend(cmd_bytes, encrypt=False, log_bytes=False)
-        udp_host, udp_port = await session.cipher.client_connect_confirm(session.reader)
+        await self.trace_event(session.asend(cmd_bytes, encrypt=False, log_bytes=False), event_name=f'CLIENT_CMD_SEND')
+
+        udp_host, udp_port = await self.trace_event(
+            session.cipher.client_connect_confirm(session.reader),
+            event_name=f'SERVER_CMD_CONFIRM'
+        )
         udp_session = await UDP_ProxySession.create(udp_host, udp_port, self.udp_cipher.copy(), target_host, target_port)
 
         self.logger.debug(f"Got an associated UDP server {udp_session.host}:{udp_session.port} through proxy")
         return udp_session, session
+
+
+    async def trace_event(self, coro: Awaitable, event_name: str, ex_class: Exception = ConnectionError):
+        try:
+            return await coro
+        except Exception as ex:
+            raise ex_class(f'Error when {event_name}: "{ex}"')
 
 
     async def close(self, session: Optional['Session'] = None):

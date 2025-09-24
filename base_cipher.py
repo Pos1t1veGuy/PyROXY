@@ -220,6 +220,7 @@ class Cipher:
             else:
                 writer.write(bytes([1, 1]))
                 await writer.drain()
+                raise ConnectionError(f"Wrong authentication data: uname={username}, pw={pw}")
 
     async def client_auth_userpass(self, username: str, password: str, reader: asyncio.StreamReader,
                                    writer: asyncio.StreamWriter) -> bool:
@@ -243,22 +244,23 @@ class Cipher:
         return True
 
     async def client_command(self, socks_version: int, user_command: int, target_host: str, target_port: int) -> bytes:
+        addr_bytes = b''
+        atyp = 0x01
+        length = 4
         try:
             ip = ipa.ip_address(target_host)
-            if ip.version == 4: # IPv4
-                atyp = 0x01
-                addr_part = ip.packed
-            else: # IPv6
+            addr_bytes = ip.packed
+            if ip.version == 6:  # IPv6
                 atyp = 0x04
-                addr_part = ip.packed
+                length = 16
         except ValueError: # domain
             atyp = 0x03
             addr_bytes = target_host.encode("idna")
-            if len(addr_bytes) > 255:
+            length = len(addr_bytes)
+            if length > 255:
                 raise ValueError("Domain name too long for SOCKS5")
-            addr_part = struct.pack("!B", len(addr_bytes)) + addr_bytes
 
-        return struct.pack("!BBBB", socks_version, user_command, 0x00, atyp) + addr_part + struct.pack("!H", target_port)
+        return struct.pack("!BBBB", socks_version, user_command, 0x00, atyp) + addr_bytes + struct.pack("!H", target_port)
 
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
                              reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:

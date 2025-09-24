@@ -54,7 +54,7 @@ def get_windows_zip_version(repo_url: str) -> Tuple[str, str]:
 
 def get_client_version(client_path: str) -> str:
     return subprocess.run(
-        [client_path, "--version"],
+        client_path.split() + ["--version"],
         capture_output=True,
         text=True
     ).stdout.strip()
@@ -88,7 +88,7 @@ if __name__ == '__main__':
 
         if not '--update_skip' in sys.argv:
             repo_version, win_zip_url = get_windows_zip_version(REPO_URL)
-            current_version = get_client_version("client.exe" if not "--py" in sys.argv else "client.py")
+            current_version = get_client_version("client.exe" if not "--py" in sys.argv else "python client.py")
 
             if repo_version != current_version:
                 agreement = input(
@@ -124,5 +124,5 @@ if __name__ == '__main__':
 
     except KeyboardInterrupt:
         pass
-    except Exception as ex:
-        input(f'[e] {ex}')
+    # except Exception as ex:
+    #     input(f'[e] {ex}')

@@ -20,7 +20,7 @@ CONNCETIONS_THRESHOLD = 100
 
 class Socks5Server:
     def __init__(self,
-                 host: str = '127.0.0.1', port: int = 1080,
+                 host: str = '127.0.0.1', udp_host: str = '127.0.0.1', port: int = 1080,
                  user_white_list: Optional[Set[str]] = None,
                  users_black_list: Optional[Set[str]] = None,
                  ciphers: List[Cipher] = [Cipher()],
@@ -36,6 +36,7 @@ class Socks5Server:
         self.accept_anonymous = accept_anonymous
         self.address_changing = address_changing
         self.host = host
+        self.udp_host = udp_host
         self.port = port
         self.user_white_list = user_white_list
         self.users_black_list = users_black_list
@@ -46,11 +47,7 @@ class Socks5Server:
         self.udp_cipher = Cipher() if udp_cipher is None else udp_cipher
         self.logger = logging.getLogger(__name__)
 
-        self.clients_tcp_timestamps: Dict[str, deque[int]] = {}
-        # self.clients_udp_timestamps: Dict[str, deque[int]] = {}
-
-        self.clients_tcp_alive_time: Dict[str, deque[int]] = {}
-        # self.clients_udp_alive_time: Dict[str, deque[int]] = {}
+        self.clients_udp_servers: Dict[str, str] = {}
 
         for cipher in self.ciphers:
             cipher.is_server = True
@@ -85,24 +82,12 @@ class Socks5Server:
                     self.logger.error(f'Can not find port to bind, {start_port} is already used')
                     raise
 
-            asyncio.create_task(self.garbage_collector())
             ciphers = f'{len(self.ciphers)} ciphers' if len(self.ciphers) > 1 else self.ciphers[0].__class__.__name__
             self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port} using {ciphers}")
             async with self.asyncio_server:
                 await self.asyncio_server.serve_forever()
         except KeyboardInterrupt:
             self.logger.info("Server is closed")
-
-    async def garbage_collector(self):
-        while True:
-            current_timestamp = time.time()
-            for ip, timestamps in list(self.clients_tcp_timestamps.items()):
-                while timestamps and current_timestamp - timestamps[0] >= SHORT_PERIOD_OF_TIME:
-                    timestamps.popleft()
-                if not timestamps:
-                    self.clients_tcp_timestamps.pop(ip)
-
-            await asyncio.sleep(1)
 
 
     async def handshake(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
@@ -125,8 +110,6 @@ class Socks5Server:
 
             self.logger.debug('The server is authorizing the client')
             auth_data = await default_cipher.server_auth_userpass(self.db_handler, reader, writer)
-            if not auth_data:
-                raise ConnectionError(f"Wrong authentication data {user}")
 
             user.username, user.password, user.key = auth_data
         else:
@@ -156,24 +139,6 @@ class Socks5Server:
                 self.logger.warning(f"Blocked connection from non-whitelisted IP: {client_ip}")
                 return
 
-        connection_start_time = time.time()
-        if client_ip not in self.clients_tcp_timestamps:
-            self.clients_tcp_timestamps[client_ip] = deque(maxlen=CONN_ALIVE_MAX_NUMS)
-        self.clients_tcp_timestamps[client_ip].append(connection_start_time)
-
-        client_connections_score = (
-            len(self.clients_tcp_timestamps.get(client_ip, [])) - CONNCETIONS_THRESHOLD
-        ) / CONNCETIONS_THRESHOLD
-        alive_time = self.clients_tcp_alive_time.get(client_ip, [])
-        if alive_time:
-            avg_time = sum(alive_time)/(len(alive_time) or 1)
-            client_alive_time_score = 1/(avg_time)
-        else:
-            client_alive_time_score = 0
-
-        client_score = client_connections_score - client_alive_time_score
-        # print('score', client_score)
-
         user = await self.add_user(client_ip, client_port, writer)
         logging.debug(f'{user} is connecting...')
         default_cipher = self.ciphers[0].copy()
@@ -195,21 +160,19 @@ class Socks5Server:
                 )
                 self.logger.info(f'Client {user} sent command {command.__qualname__} to {addr}:{port}')
 
+                if command == ConnectionMethods.UDP_ASSOCIATE:
+                    ...
+
                 result_code, traffic_stats = await command(self, addr, port, user, cipher, reader, writer)
                 self.logger.info(f'Сompleted the operation successfully, code: {result_code}')
 
             else:
                 self.logger.warning(f'Suspicious client tried to connect: {user}')
 
-        # except Exception as e:
-        #     self.logger.error(f"Connection error: {repr(e)}")
+        except Exception as e:
+            self.logger.error(f"Connection error: {repr(e)}")
 
         finally:
-            alive_time = time.time() - connection_start_time
-            if client_ip not in self.clients_tcp_alive_time:
-                self.clients_tcp_alive_time[client_ip] = deque(maxlen=CONN_ALIVE_MAX_NUMS)
-            self.clients_tcp_alive_time[client_ip].append(alive_time)
-
             await user.disconnect()
 
     async def pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, name: str = 'default',
@@ -574,7 +537,7 @@ class ConnectionMethods:
         try:
             transport, protocol = await loop.create_datagram_endpoint(
                 lambda: UDPServerProxy(server, user),
-                local_addr=('0.0.0.0', 0)
+                local_addr=(server.udp_host, 0)
             )
         except Exception as e:
             server.logger.error(f"Failed to start UDP relay: {e}")

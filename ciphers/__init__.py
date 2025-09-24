@@ -76,7 +76,7 @@ class AES_CTR(Cipher):
 
         return method
 
-    async def server_auth_userpass(self, logins: Dict[str, str], reader: asyncio.StreamReader,
+    async def server_auth_userpass(self, db_handler: 'Handler', reader: asyncio.StreamReader,
                                    writer: asyncio.StreamWriter) -> Optional[Tuple[str, str]]:
         encrypted_header = await reader.readexactly(2)
         auth_version, ulen = struct.unpack("!BB", b''.join(self.decrypt(encrypted_header)))
@@ -90,13 +90,16 @@ class AES_CTR(Cipher):
         password = await reader.readexactly(plen)
         password = b''.join(self.decrypt(password)).decode()
 
-        if logins.get(username) == password:
+        db_pw, db_key = db_handler.get_user(username)
+
+        if db_pw == password:
             writer.write(b''.join(self.encrypt(struct.pack("!BB", 1, 0))))
             await writer.drain()
-            return username, password
+            return username, password, db_key
         else:
             writer.write(b''.join(self.encrypt(struct.pack("!BB", 1, 1))))
             await writer.drain()
+            raise ConnectionError(f"Wrong authentication data: uname={username}, pw={password}")
 
     async def client_auth_userpass(self, username: str, password: str, reader: asyncio.StreamReader,
                                    writer: asyncio.StreamWriter) -> bool:
@@ -125,26 +128,26 @@ class AES_CTR(Cipher):
     async def client_finish_handshake(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
         self._init_ciphers(await reader.readexactly(self.iv_length))
         return True
-#################
+
     async def client_command(self, socks_version: int, user_command: int, target_host: str, target_port: int) -> List[bytes]:
+        addr_bytes = b''
+        atyp = 0x01
+        length = 4
         try:
             ip = ipa.ip_address(target_host)
-            if ip.version == 4: # IPv4
-                atyp = 0x01
-                addr_part = ip.packed
-            else: # IPv6
+            addr_bytes = ip.packed
+            if ip.version == 6:  # IPv6
                 atyp = 0x04
-                addr_part = ip.packed
+                length = 16
         except ValueError: # domain
             atyp = 0x03
             addr_bytes = target_host.encode("idna")
             length = len(addr_bytes)
             if length > 255:
                 raise ValueError("Domain name too long for SOCKS5")
-            addr_part = struct.pack("!B", length) + addr_bytes
 
         return self.encrypt(
-            struct.pack("!BBBB", socks_version, user_command, 0x00, atyp) + addr_part + struct.pack("!H", target_port)
+            struct.pack("!BBBB", socks_version, user_command, 0x00, atyp) + addr_bytes + struct.pack("!H", target_port)
         )
 
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
@@ -302,13 +305,16 @@ class AES_CBC(Cipher): # ДОДЕЛАТЬ ЭТО ДЕРЬМИЩЕ!!!!!!!!!!
         decrypted_password = b''.join(self.decrypt(await reader.readexactly(padded_plen)))
         password = decrypted_password[:plen].decode()
 
-        if logins.get(username) == password:
+        db_pw, db_key = db_handler.get_user(username)
+
+        if db_pw == password:
             writer.write(b''.join(self.encrypt(struct.pack("!BB", 1, 0))))
             await writer.drain()
-            return username, password
+            return username, password, db_key
         else:
             writer.write(b''.join(self.encrypt(struct.pack("!BB", 1, 1))))
             await writer.drain()
+            raise ConnectionError(f"Wrong authentication data: uname={username}, pw={pw}")
 
     async def client_auth_userpass(self, username: str, password: str, reader: asyncio.StreamReader,
                                    writer: asyncio.StreamWriter) -> bool:
@@ -544,6 +550,7 @@ class ChaCha20_Poly1305(Cipher):
         else:
             writer.write(b''.join(self.encrypt(struct.pack("!BB", 1, 1))))
             await writer.drain()
+            raise ConnectionError(f"Wrong authentication data: uname={username}, pw={password}")
 
     async def client_auth_userpass(self, username: str, password: str, reader: asyncio.StreamReader,
                                    writer: asyncio.StreamWriter) -> bool:
@@ -565,25 +572,24 @@ class ChaCha20_Poly1305(Cipher):
         return True
 
     async def client_command(self, socks_version: int, user_command: int, target_host: str, target_port: int) -> bytes:
+        addr_bytes = b''
+        atyp = 0x01
         length = 4
         try:
             ip = ipa.ip_address(target_host)
-            if ip.version == 4: # IPv4
-                atyp = 0x01
-                addr_part = ip.packed
-            else: # IPv6
+            addr_bytes = ip.packed
+            if ip.version == 6:  # IPv6
                 atyp = 0x04
                 length = 16
-                addr_part = ip.packed
         except ValueError: # domain
             atyp = 0x03
-            addr_part = target_host.encode("idna")
-            length = len(addr_part)
+            addr_bytes = target_host.encode("idna")
+            length = len(addr_bytes)
             if length > 255:
                 raise ValueError("Domain name too long for SOCKS5")
 
         first_block = self.encrypt(struct.pack("!BBBBB", socks_version, user_command, 0x00, atyp, length+2))
-        second_block = self.encrypt(addr_part + struct.pack("!H", target_port))
+        second_block = self.encrypt(addr_bytes + struct.pack("!H", target_port))
         return first_block + second_block
 
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],

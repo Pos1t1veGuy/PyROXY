@@ -1,4 +1,4 @@
 #!/bin/bash
-tmux kill-session -t main 2>/dev/null
-tmux kill-session -t bot 2>/dev/null
+sudo bash ./stop_server.sh
+sudo bash ./stop_bot.sh
 echo "Сервер и бот остановлены."

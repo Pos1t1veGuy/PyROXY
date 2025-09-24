@@ -28,14 +28,27 @@ class SQLite_Handler(Handler):
                 );
             ''')
 
-    def get_user(self, username: str) -> Tuple[str, str]:
+    def is_subscriber(self, username: str) -> bool:
         with sqlite3.connect(self.filepath) as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                'SELECT password, key FROM users WHERE username = ?',
-                (username,)
-            )
+            cursor.execute('''
+                SELECT 1 FROM buys
+                WHERE username = ?
+                  AND expires_at > CURRENT_TIMESTAMP
+                LIMIT 1
+            ''', (username,))
             result = cursor.fetchone()
-            if result:
-                return result[0], bytes.fromhex(result[1])
-            return None, None
+            return result is not None
+
+    def get_user(self, username: str) -> Tuple[Optional[str], Optional[str]]:
+        if self.is_subscriber(username):
+            with sqlite3.connect(self.filepath) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    'SELECT password, key FROM users WHERE username = ?',
+                    (username,)
+                )
+                result = cursor.fetchone()
+                if result:
+                    return result[0], bytes.fromhex(result[1])
+                return None, None
