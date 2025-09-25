@@ -541,7 +541,11 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
         self.pipe = Socks5Server.pipe
         self.close_writer = Socks5Server.close_writer
-        self.user_commands = {}
+        self.user_commands = {
+            0x01: self.CONNECT,
+            0x02: self.BIND,
+            0x03: self.UDP_ASSOCIATE,
+        }
 
         self._local_host = 'localhost'
         self._local_host = 0
@@ -759,7 +763,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
         self.logger.info(f'Local client connected {user}')
 
         addr, port, command = await default_cipher.server_handle_command(
-            self.socks_version, self.local_server.user_commands, client_reader
+            self.socks_version, self.user_commands, client_reader
         )
         self.logger.info(f'Local client {user} sent command {command.__qualname__} to {addr}:{port}')
         return addr, port, command, default_cipher
@@ -794,17 +798,8 @@ class Socks5_TCP_Retranslator(Socks5Client):
                 pass
             return
 
-
-        if command == ConnectionMethods.CONNECT:
-            status_code = await self.CONNECT(addr, port, default_cipher, remote_session)
-            self.logger.debug(f"TCP connection to {addr}:{port} is closed, code: {status_code}")
-        elif command == ConnectionMethods.UDP_ASSOCIATE:
-            status_code = await self.UDP_ASSOCIATE(addr, port, default_cipher, remote_session)
-            self.logger.debug(f"UDP connection to {addr}:{port} is closed, code: {status_code}")
-        elif command == ConnectionMethods.BIND:
-            status_code = await self.BIND(addr, port, default_cipher, remote_session)
-            self.logger.debug(f"TCP connection to {addr}:{port} is closed, code: {status_code}")
-
+        status_code = await command(addr, port, default_cipher, remote_session)
+        self.logger.debug(f"Connection to {addr}:{port} is closed, code: {status_code}")
         await self.close_writer(client_writer)
         try:
             await remote_session.close()
