@@ -210,13 +210,15 @@ class Socks5Server:
             await user.disconnect()
 
     async def pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, name: str = 'default',
-                   encrypt: Optional[callable] = None, decrypt: Optional[callable] = None, timeout: int = 300
-                   ) -> Tuple[int, int]:
+                   encrypt: Optional[callable] = None, decrypt: Optional[callable] = None, timeout: int = 300,
+                   loop_condition: Optional[Callable[[], bool]] = None) -> Tuple[int, int]:
         try:
             bytes_received = 0
             bytes_sent = 0
             buffer = bytearray()
-            while not reader.at_eof():
+            loop_condition = loop_condition if callable(loop_condition) else (lambda: True)
+
+            while (not reader.at_eof()) and loop_condition():
                 data = await asyncio.wait_for(reader.read(4096), timeout=timeout)
                 if not data:
                     break
@@ -505,6 +507,21 @@ class UDPServerProxy(asyncio.DatagramProtocol):
 
 class ConnectionMethods:
     @staticmethod
+    async def PING(server: Socks5Server, addr: str, port: int, user: User, cipher: Cipher,
+                      client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> Tuple[int, List[int]]:
+        server.logger.debug(f"Getting PING from {user}...")
+
+        reply_frames = await server.trace_event(
+            cipher.server_make_reply(server.socks_version, REPLYES_CODES['succeeded'], '0.0.0.0', 0),
+            event_name=f'CMD_CONFIRM'
+        )
+        client_writer.write(b''.join(reply_frames))
+        await client_writer.drain()
+
+        server.logger.debug(f"Sent PONG to {user}")
+        return 0, [0,0]
+
+    @staticmethod
     async def CONNECT(server: Socks5Server, addr: str, port: int, user: User, cipher: Cipher,
                       client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> Tuple[int, List[int]]:
         server.logger.debug(f"Establishing TCP connection for {user} to {addr}:{port}...")
@@ -637,6 +654,7 @@ class ConnectionMethods:
 
 
 USER_COMMANDS = {
+    0x00: ConnectionMethods.PING,
     0x01: ConnectionMethods.CONNECT,
     0x02: ConnectionMethods.BIND,
     0x03: ConnectionMethods.UDP_ASSOCIATE,

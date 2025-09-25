@@ -31,6 +31,7 @@ class Socks5Client:
         self.udp_cipher.is_client = True
 
         self.user_commands = {
+            'ping': 0x00,
             'connect': 0x01,
             'bind': 0x02,
             'associate': 0x03,
@@ -38,7 +39,7 @@ class Socks5Client:
         self.sessions = []
 
     async def handshake(self, proxy_host: str = '127.0.0.1', proxy_port: int = 1080, username: Optional[str] = None,
-                        password: Optional[str] = None) -> 'TCP_ProxySession':
+                        password: Optional[str] = None, logging: bool = True) -> 'TCP_ProxySession':
         reader, writer = await asyncio.open_connection(proxy_host, proxy_port)
         try:
             cipher = self.ciphers[self.cipher_index]
@@ -51,14 +52,15 @@ class Socks5Client:
         session = TCP_ProxySession(self, reader, writer, cipher, proxy_host, proxy_port,
                                    username=username, password=password, log_bytes=self.log_bytes)
         self.sessions.append(session)
-        self.logger.info(
-            f"Connected to SOCKS5 proxy at {proxy_host}:{proxy_port} using {self.ciphers[self.cipher_index].__class__.__name__}"
-        )
+        if logging:
+            self.logger.info(
+                f"Connected to SOCKS5 proxy at {proxy_host}:{proxy_port} using {self.ciphers[self.cipher_index].__class__.__name__}"
+            )
         await default_cipher.client_hello(self, reader, writer)
-        self.logger.debug("Sent client_hello")
+        if logging: self.logger.debug("Sent client_hello")
         if not self.default_socks5:
             if await default_cipher.client_send_cipher(self, self.cipher_index, reader, writer):
-                self.logger.debug("Sent a cipher to the server")
+                if logging: self.logger.debug("Sent a cipher to the server")
             else:
                 raise ConnectionError(f"Server has denied choosed cipher {self.cipher_index}")
 
@@ -66,11 +68,11 @@ class Socks5Client:
         if username and password:
             methods.insert(0, 0x02)
 
-        self.logger.debug("Sent auth methods")
+        if logging: self.logger.debug("Sent auth methods")
         methods_msg = await default_cipher.client_send_methods(self.socks_version, methods)
 
         await self.trace_event(session.asend(methods_msg, encrypt=False, log_bytes=False), event_name=f'CLIENT_HELLO')
-        self.logger.debug("Receiving server auth method")
+        if logging: self.logger.debug("Receiving server auth method")
         method_chosen = await self.trace_event(
             default_cipher.client_get_method(self.socks_version, reader),
             event_name=f'GETTING_AUTH_METHODS'
@@ -84,39 +86,57 @@ class Socks5Client:
                 if not username or not password:
                     raise ConnectionError("Proxy requires username/password authentication, but none provided")
 
-                self.logger.debug("Client is authorizing")
+                if logging: self.logger.debug("Client is authorizing")
                 auth_ok = await self.trace_event(
                     default_cipher.client_auth_userpass(username, password, reader, writer),
                     event_name='AUTH'
                 )
                 if not auth_ok:
                     raise ConnectionError("Authentication failed")
-                self.logger.info("Authenticated successfully")
+                if logging: self.logger.info("Authenticated successfully")
 
             elif method_chosen == 0x00:
-                self.logger.info("No authentication required by proxy")
+                if logging: self.logger.info("No authentication required by proxy")
 
             else:
                 raise ConnectionError(f"Unsupported authentication method selected by proxy: {method_chosen}")
 
             if await session.cipher.client_finish_handshake(reader, writer):
-                self.logger.debug("Handshaked")
+                if logging: self.logger.debug("Handshaked")
                 session.cipher.is_handshaked = True
                 return session
             else:
                 raise ConnectionError(f'{user} refused a handshake')
         except Exception as ex:
-            self.logger.error(ex)
+            if logging: self.logger.error(ex)
             raise ex
 
+
+    async def ping(self, proxy_host: str = '127.0.0.1', proxy_port: int = 1080, username: Optional[str] = None,
+                   password: Optional[str] = None) -> bool:
+        try:
+            self.logger.debug(f"Ping to proxy")
+            session = await self.handshake(proxy_host=proxy_host, proxy_port=proxy_port,
+                                           username=username, password=password, logging=False)
+
+            cmd_bytes = await session.cipher.client_command(self.socks_version, self.user_commands['ping'], '0.0.0.0', 0)
+            await self.trace_event(session.asend(cmd_bytes, encrypt=False, log_bytes=False), event_name=f'CLIENT_CMD_SEND')
+
+            address, port = await self.trace_event(
+                session.cipher.client_connect_confirm(session.reader),
+                event_name=f'SERVER_CMD_CONFIRM'
+            )
+
+            self.logger.debug(f"Pong from proxy")
+            return address == '0.0.0.0' and port == 0
+        except:
+            return False
 
     async def connect(self, target_host: str, target_port: int,
                             proxy_host: str = '127.0.0.1', proxy_port: int = 1080,
                             username: Optional[str] = None, password: Optional[str] = None) -> 'TCP_ProxySession':
 
-        session = await self.handshake(proxy_host=proxy_host, proxy_port=proxy_port,
-                                           username=username, password=password)
-
+        session = await self.handshake(proxy_host=proxy_host, proxy_port=proxy_port, username=username, password=password)
 
         cmd_bytes = await session.cipher.client_command(
             self.socks_version, self.user_commands['connect'], target_host, target_port
@@ -377,10 +397,10 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
             ip = ipaddress.ip_address(host)
             if ip.version == 4:
                 atyp = 1  # IPv4
-                addr_bytes = ip.packed  # 4 байта
+                addr_bytes = ip.packed
             else:
                 atyp = 4  # IPv6
-                addr_bytes = ip.packed  # 16 байт
+                addr_bytes = ip.packed
         except ValueError:
             atyp = 3  # Domain
             host_bytes = host.encode("idna")
@@ -521,6 +541,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
         self.pipe = Socks5Server.pipe
         self.close_writer = Socks5Server.close_writer
+        self.user_commands = {}
 
         self._local_host = 'localhost'
         self._local_host = 0
@@ -530,15 +551,22 @@ class Socks5_TCP_Retranslator(Socks5Client):
     async def async_listen_and_forward(self, local_host: str = '127.0.0.1', local_port: int = 1080,
                                        log_bytes: bool = False):
         try:
-            self.local_server = Socks5Server(host=local_host, port=local_port, accept_anonymous=True)
-            self.local_server.handle_client = self.handle_local_client
-            self.logger.info(f"Retranslator started at {local_host}:{local_port} for {self.remote_host}:{self.remote_port}")
-            self.local_server.logger = self.logger
+            self.server_is_available = await self.ping(proxy_host=self.remote_host, proxy_port=self.remote_port,
+                                                       username=self.username, password=self.password)
 
-            self._local_host = self.local_server.host
-            self._local_host = self.local_server.port
+            if self.server_is_available:
+                self.local_server = Socks5Server(host=local_host, port=local_port, accept_anonymous=True)
+                self.local_server.handle_client = self.handle_local_client
+                self.logger.info(f"Retranslator started at {local_host}:{local_port} for {self.remote_host}:{self.remote_port}")
+                self.local_server.logger = self.logger
 
-            await self.local_server.start()
+                self._local_host = self.local_server.host
+                self._local_host = self.local_server.port
+
+                await self.local_server.start()
+            else:
+                self.logger.error(f"Server is not available {self.remote_host}:{self.remote_port}")
+
         except KeyboardInterrupt:
             self.logger.info('Client closed by user')
         except RuntimeError:
@@ -549,16 +577,196 @@ class Socks5_TCP_Retranslator(Socks5Client):
             asyncio.run(self.async_listen_and_forward(*args, **kwargs))
         except KeyboardInterrupt:
             self.logger.info('Client closed by user')
-        except (ConnectionResetError, OSError) as ex:
-            self.logger.info(f'Server closed {ex}')
+
+
+    async def CONNECT(self, addr: str, port: int, default_cipher: Cipher, remote_session: TCP_ProxySession) -> int:
+        if (addr == '0.0.0.0' and port == 0) or (addr.startswith('192.168') or addr.startswith('10.') or
+                                                 addr.startswith('127.')) or addr == self.remote_host:
+            self.logger.debug(
+                f'INVALID IP ADDRESS TO CONNECT: Ignored {user}`s request to {addr}. You may try to reboot the '
+                f'computer to delete this message.'
+            )
+            try:
+                reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'],
+                                                               '0.0.0.0', 0)
+                for r in reply:
+                    client_writer.write(r)
+                await client_writer.drain()
+            except Exception as e:
+                try:
+                    client_writer.write(
+                        await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'],
+                                                               '0.0.0.0', 0)
+                    )
+                    await client_writer.drain()
+                except:
+                    pass
+            return 1
+
+        cmd_bytes = await remote_session.cipher.client_command(
+            self.socks_version, self.user_commands['connect'], addr, port
+        )
+        await remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False)
+        try:
+            address, port = await remote_session.cipher.client_connect_confirm(remote_session.reader)
+        except ConnectionError as e:
+            self.logger.error(e)
+            return 1
+
+        self.logger.debug(f"Establishing TCP connection to {addr}:{port}...")
+
+        try:
+            local_ip, local_port = remote_session.writer.get_extra_info("sockname")
+            reply_frames = await default_cipher.server_make_reply(
+                self.socks_version, REPLYES_CODES['succeeded'], local_ip, local_port
+            )
+            client_writer.write(b''.join(reply_frames))
+            await client_writer.drain()
+        except Exception as e:
+            self.logger.warning(f"Failed to connect to {addr}:{port} => {e}")
+            reply_frames = await default_cipher.server_make_reply(
+                self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0
+            )
+            try:
+                client_writer.write(b''.join(reply_frames))
+                await client_writer.drain()
+            except:
+                pass
+            return 1
+
+        try:
+            await asyncio.gather(
+                self.pipe(self, client_reader, remote_session.writer, encrypt=remote_session.cipher.encrypt,
+                          name='client -> server'),
+                self.pipe(self, remote_session.reader, client_writer, decrypt=remote_session.cipher.decrypt,
+                          name='client <- server'),
+            )
+        except (ConnectionResetError, OSError):
+            pass
+
+        try:
+            t1 = asyncio.create_task(self.pipe(self, client_reader, remote_session.writer,
+                                               encrypt=remote_session.cipher.encrypt, name='client -> server'))
+            t2 = asyncio.create_task(self.pipe(self, remote_session.reader, client_writer,
+                                               decrypt=remote_session.cipher.decrypt, name='client <- server'))
+            done, pending = await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
+        except (ConnectionResetError, OSError):
+            pass
+
+        for t in pending:
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+
+        c2s_bytes = [0, 0]
+        s2c_bytes = [0, 0]
+
+        if t1.done():
+            try:
+                c2s_bytes = t1.result()
+            except asyncio.CancelledError:
+                pass
+        if t2.done():
+            try:
+                s2c_bytes = t2.result()
+            except asyncio.CancelledError:
+                pass
+        
+        return 0
+
+    async def UDP_ASSOCIATE(self, addr: str, port: int, default_cipher: Cipher, remote_session: TCP_ProxySession) -> int:
+        self.logger.debug("Starting UDP server...")
+        cmd_bytes = await remote_session.cipher.client_command(
+            self.socks_version, self.user_commands['associate'], addr, port
+        )
+        await remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False)
+        address, port = await remote_session.cipher.client_connect_confirm(remote_session.reader)
+
+        self.logger.debug(f"Establishing UDP connection to {address}:{port}...")
+        loop = asyncio.get_running_loop()
+
+        try:
+            udp_session = await Socks5_UDP_Retranslator.create(
+                self.remote_host, port, self.udp_cipher
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to start UDP relay: {e}")
+            reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0)
+            for r in reply:
+                client_writer.write(r)
+            await client_writer.drain()
+            return 1
+
+        self.logger.info(f"Started UDP server for {addr}:{port} at {udp_session.host}:{udp_session.port}")
+
+        try:
+            reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['succeeded'],
+                                                           udp_session.host, udp_session.port)
+            for r in reply:
+                client_writer.write(r)
+            await client_writer.drain()
+        except Exception as e:
+            self.logger.warning(f"Failed to make UDP connection at TCP {addr}:{port}; UDP {udp_host}:{udp_port} => {e}")
+            try:
+                client_writer.write(
+                    await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0))
+                await client_writer.drain()
+            except:
+                pass
+            return 1
+
+        try:
+            while True:
+                try:
+                    if self.local_server.stop:
+                        self.logger.debug("Server stopping: closing UDP assoc.")
+                        break
+                    if not user.connected:
+                        self.logger.debug("User disconnected: closing UDP assoc.")
+                        break
+
+                    if client_reader.at_eof():
+                        self.logger.debug("TCP reader EOF: closing UDP assoc.")
+                        break
+                    if client_writer.is_closing():
+                        self.logger.debug("TCP writer closing: closing UDP assoc.")
+                        break
+
+                    await asyncio.sleep(2)
+                except Exception as e:
+                    self.logger.warning(f"UDP_ASSOCIATE TCP connection error: {e}")
+                    break
+        finally:
+            udp_session.close()
+
+    async def BIND(self, addr: str, port: int, default_cipher: Cipher, remote_session: TCP_ProxySession) -> int:
+        cmd_bytes = await remote_cipher.client_command(
+            self.socks_version, self.user_commands['bind'], addr, port
+        )
+        await remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False)
+        address, port = await remote_session.cipher.client_connect_confirm(remote_session.reader)
+        return 1
+
+
+    async def listen_local_cmd(self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter
+                               ) -> Tuple[str, int, Callable, Cipher]:
+        default_cipher = self.local_server.ciphers[0].copy()
+        self.logger.debug('Local client connecting...')
+        user, default_cipher = await self.local_server.handshake(client_reader, client_writer, default_cipher, default_cipher)
+
+        self.logger.info(f'Local client connected {user}')
+
+        addr, port, command = await default_cipher.server_handle_command(
+            self.socks_version, self.local_server.user_commands, client_reader
+        )
+        self.logger.info(f'Local client {user} sent command {command.__qualname__} to {addr}:{port}')
+        return addr, port, command, default_cipher
 
     async def handle_local_client(self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter):
-        default_cipher = self.local_server.ciphers[0].copy()
-
-        # Connecting to the local proxy, getting a command
-        self.logger.debug('Local client connecting...')
         try:
-            user, default_cipher = await self.local_server.handshake(client_reader, client_writer, default_cipher, default_cipher)
+            addr, port, command, default_cipher = self.listen_local_cmd(client_reader, client_writer, default_cipher)
         except Exception as e:
             self.logger.error(
                 f"Can not do handshake to local proxy {self.local_server.host}:{self.local_server.port} — {e}"
@@ -566,17 +774,12 @@ class Socks5_TCP_Retranslator(Socks5Client):
             client_writer.close()
             await client_writer.wait_closed()
             return
-        self.logger.info(f'Local client connected {user}')
-        addr, port, command = await default_cipher.server_handle_command(
-            self.socks_version, self.local_server.user_commands, client_reader
-        )
-        self.logger.info(f'Local client {user} sent command {command.__qualname__} to {addr}:{port}')
 
-        # Connecting to the remote proxy, sending command
         try:
             remote_session = await self.handshake(
                 proxy_host=self.remote_host, proxy_port=self.remote_port, username=self.username, password=self.password
             )
+            self.logger.debug(f'Client {user} handshaked with remote server')
         except ConnectionRefusedError:
             self.logger.error(f"Can not connect to remote proxy {self.remote_host}:{self.remote_port}")
             client_writer.close()
@@ -591,176 +794,16 @@ class Socks5_TCP_Retranslator(Socks5Client):
                 pass
             return
 
-        self.logger.debug(f'Client {user} handshaked with remote server')
-
 
         if command == ConnectionMethods.CONNECT:
-            if (addr == '0.0.0.0' and port == 0) or (addr.startswith('192.168') or addr.startswith('10.') or
-                                                     addr.startswith('127.')) or addr == self.remote_host:
-                self.logger.debug(
-                    f'INVALID IP ADDRESS TO CONNECT: Ignored {user}`s request to {addr}. You may try to reboot the '
-                    f'computer to delete this message.'
-                )
-                try:
-                    reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'],
-                                                                   '0.0.0.0', 0)
-                    for r in reply:
-                        client_writer.write(r)
-                    await client_writer.drain()
-                except Exception as e:
-                    try:
-                        client_writer.write(
-                            await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'],
-                                                                   '0.0.0.0', 0)
-                        )
-                        await client_writer.drain()
-                    except:
-                        pass
-                return
-
-            cmd_bytes = await remote_session.cipher.client_command(
-                self.socks_version, self.user_commands['connect'], addr, port
-            )
-            await remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False)
-            try:
-                address, port = await remote_session.cipher.client_connect_confirm(remote_session.reader)
-            except ConnectionError as e:
-                self.logger.error(e)
-                return
-
-            self.logger.debug(f"Establishing TCP connection to {addr}:{port}...")
-
-            try:
-                local_ip, local_port = remote_session.writer.get_extra_info("sockname")
-                reply_frames = await default_cipher.server_make_reply(
-                    self.socks_version, REPLYES_CODES['succeeded'], local_ip, local_port
-                )
-                client_writer.write(b''.join(reply_frames))
-                await client_writer.drain()
-            except Exception as e:
-                self.logger.warning(f"Failed to connect to {addr}:{port} => {e}")
-                reply_frames = await default_cipher.server_make_reply(
-                    self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0
-                )
-                try:
-                    client_writer.write(b''.join(reply_frames))
-                    await client_writer.drain()
-                except:
-                    pass
-                return
-
-            try:
-                await asyncio.gather(
-                    self.pipe(self, client_reader, remote_session.writer, encrypt=remote_session.cipher.encrypt, name='client -> server'),
-                    self.pipe(self, remote_session.reader, client_writer, decrypt=remote_session.cipher.decrypt, name='client <- server'),
-                )
-            except (ConnectionResetError, OSError):
-                pass
-
-            try:
-                t1 = asyncio.create_task(self.pipe(self, client_reader, remote_session.writer,
-                                                   encrypt=remote_session.cipher.encrypt, name='client -> server'))
-                t2 = asyncio.create_task(self.pipe(self, remote_session.reader, client_writer,
-                                                   decrypt=remote_session.cipher.decrypt, name='client <- server'))
-                done, pending = await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
-            except (ConnectionResetError, OSError):
-                pass
-
-            for t in pending:
-                t.cancel()
-                try:
-                    await t
-                except asyncio.CancelledError:
-                    pass
-
-            c2s_bytes = [0, 0]
-            s2c_bytes = [0, 0]
-
-            if t1.done():
-                try:
-                    c2s_bytes = t1.result()
-                except asyncio.CancelledError:
-                    pass
-            if t2.done():
-                try:
-                    s2c_bytes = t2.result()
-                except asyncio.CancelledError:
-                    pass
-            self.logger.debug(f"TCP connection to {addr}:{port} is closed")
-
-
+            status_code = await self.CONNECT(addr, port, default_cipher, remote_session)
+            self.logger.debug(f"TCP connection to {addr}:{port} is closed, code: {status_code}")
         elif command == ConnectionMethods.UDP_ASSOCIATE:
-            self.logger.debug("Starting UDP server...")
-            cmd_bytes = await remote_session.cipher.client_command(
-                self.socks_version, self.user_commands['associate'], addr, port
-            )
-            await remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False)
-            address, port = await remote_session.cipher.client_connect_confirm(remote_session.reader)
-
-            self.logger.debug(f"Establishing UDP connection to {address}:{port}...")
-            loop = asyncio.get_running_loop()
-
-            try:
-                udp_session = await Socks5_UDP_Retranslator.create(
-                    self.remote_host, port, self.udp_cipher
-                )
-            except Exception as e:
-                self.logger.error(f"Failed to start UDP relay: {e}")
-                reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0)
-                for r in reply:
-                    client_writer.write(r)
-                await client_writer.drain()
-                return 1
-
-            self.logger.info(f"Started UDP server for {addr}:{port} at {udp_session.host}:{udp_session.port}")
-
-            try:
-                reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['succeeded'],
-                                                               udp_session.host, udp_session.port)
-                for r in reply:
-                    client_writer.write(r)
-                await client_writer.drain()
-            except Exception as e:
-                self.logger.warning(f"Failed to make UDP connection at TCP {addr}:{port}; UDP {udp_host}:{udp_port} => {e}")
-                try:
-                    client_writer.write(await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0))
-                    await client_writer.drain()
-                except:
-                    pass
-                return 1
-
-            try:
-                while True:
-                    try:
-                        if self.local_server.stop:
-                            self.logger.debug("Server stopping: closing UDP assoc.")
-                            break
-                        if not user.connected:
-                            self.logger.debug("User disconnected: closing UDP assoc.")
-                            break
-
-                        if client_reader.at_eof():
-                            self.logger.debug("TCP reader EOF: closing UDP assoc.")
-                            break
-                        if client_writer.is_closing():
-                            self.logger.debug("TCP writer closing: closing UDP assoc.")
-                            break
-
-                        await asyncio.sleep(2)
-                    except Exception as e:
-                        self.logger.warning(f"UDP_ASSOCIATE TCP connection error: {e}")
-                        break
-            finally:
-                udp_session.close()
-
-
+            status_code = await self.UDP_ASSOCIATE(addr, port, default_cipher, remote_session)
+            self.logger.debug(f"UDP connection to {addr}:{port} is closed, code: {status_code}")
         elif command == ConnectionMethods.BIND:
-            cmd_bytes = await remote_cipher.client_command(
-                self.socks_version, self.user_commands['bind'], addr, port
-            )
-            await remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False)
-            address, port = await remote_session.cipher.client_connect_confirm(remote_session.reader)
-
+            status_code = await self.BIND(addr, port, default_cipher, remote_session)
+            self.logger.debug(f"TCP connection to {addr}:{port} is closed, code: {status_code}")
 
         await self.close_writer(client_writer)
         try:

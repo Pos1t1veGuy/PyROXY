@@ -24,11 +24,6 @@ def is_admin() -> bool:
     else:
         return os.geteuid() == 0
 
-def restart():
-    print("[+] Restarting...")
-    subprocess.Popen([sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]] + sys.argv[1:], close_fds=True)
-    sys.exit(0)
-
 
 def get_windows_zip_version(repo_url: str) -> Tuple[str, str]:
     resp = rq.get(f'{repo_url}/releases')
@@ -80,6 +75,35 @@ def download_file(url: str, dest: Optional[str] = None) -> str:
     return dest
 
 
+def check_updates():
+    print(f'[+] Checking updates...')
+    try:
+        repo_version, win_zip_url = get_windows_zip_version(REPO_URL)
+    except ConnectionError:
+        print('[w] Github service is unavailable, unable to check for updates')
+        return
+
+    current_version = get_client_version("client.exe" if not "--py" in sys.argv else "python client.py")
+
+    if repo_version != current_version:
+        agreement = input(
+            '[+] PyROXY client is outdated and needs to be updated. Leaving the current version may'
+            f' cause compatibility issues.\n\n{current_version} -> {repo_version}\n'
+            '\nSkip updating?\nY/N: ')
+
+        if agreement.lower() in ['y', 'yes', 'н']:
+            print('[-] Cancelled by user')
+        else:
+            zip_path = download_file(win_zip_url)
+            with zipfile.ZipFile(BASE_DIR / zip_path, 'r') as zip_ref:
+                zip_ref.extract(updater, BASE_DIR)
+            print(f'\n[+] Download finished')
+            subprocess.Popen([str(BASE_DIR / updater), str(BASE_DIR / zip_path)])
+            sys.exit(0)
+    else:
+        print(f'[+] Running PyROXY client {current_version} - latest')
+
+
 if __name__ == '__main__':
     try:
         if not is_admin():
@@ -87,36 +111,16 @@ if __name__ == '__main__':
             sys.exit(1)
 
         if not '--update_skip' in sys.argv:
-            repo_version, win_zip_url = get_windows_zip_version(REPO_URL)
-            current_version = get_client_version("client.exe" if not "--py" in sys.argv else "python client.py")
-
-            if repo_version != current_version:
-                agreement = input(
-                    '[+] PyROXY client is outdated and needs to be updated. Leaving the current version may'
-                    f' cause compatibility issues.\n\n{current_version} -> {repo_version}\n'
-                    '\nSkip updating?\nY/N: ')
-
-                if agreement.lower() in ['y', 'yes', 'н']:
-                    print('[-] Cancelled by user')
-                else:
-                    zip_path = download_file(win_zip_url)
-                    with zipfile.ZipFile(BASE_DIR / zip_path, 'r') as zip_ref:
-                        zip_ref.extract(updater, BASE_DIR)
-                    print(f'\n[+] Download finished')
-                    subprocess.Popen([str(BASE_DIR / updater), str(BASE_DIR / zip_path)])
-                    sys.exit(0)
-
-
+            check_updates()
         if '--py' in sys.argv:
             tunnel = Path(__file__).parent.parent.parent / 'tunnel'
             client = f'python client.py --tun2socks_path {tunnel / "tun2socks.exe"}'
 
-
         if os.path.isfile('profile.pyroxy'):
-            print('[+] running with profile config...')
+            print('[+] Running with profile config...')
             parameters = ' --'.join(open('profile.pyroxy', 'r').read().split('\n'))
             os.system(
-                f'{client} --{parameters}' + ' '.join(sys.argv[1:]).replace('--py', '')
+                f'{client} --{parameters}' + ' '.join(sys.argv[1:]).replace('--py', '').replace('--update_skip', '')
             )
             input('[+] Press ENTER to exit. ')
         else:
@@ -124,5 +128,5 @@ if __name__ == '__main__':
 
     except KeyboardInterrupt:
         pass
-    # except Exception as ex:
-    #     input(f'[e] {ex}')
+    except Exception as ex:
+        input(f'[e] {ex}')

@@ -83,7 +83,7 @@ def main():
     tunnel = Tun2Socks(args.host, path_to_exe=args.tun2socks_path, silent=not bool(args.tunnel_debug))
     if args.auto_forward_traffic == 1:
         tunnel.stop() # to delete broken routes
-        print('[+] auto forward enabled')
+        print('[+] Auto forward enabled')
         tunnel.start(args.local_host, args.local_port)
 
     if args.key == '.':
