@@ -210,15 +210,14 @@ class Socks5Server:
             await user.disconnect()
 
     async def pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, name: str = 'default',
-                   encrypt: Optional[callable] = None, decrypt: Optional[callable] = None, timeout: int = 300,
-                   loop_condition: Optional[Callable[[], bool]] = None) -> Tuple[int, int]:
+                   encrypt: Optional[callable] = None, decrypt: Optional[callable] = None, timeout: int = 300
+                   ) -> Tuple[int, int]:
         try:
             bytes_received = 0
             bytes_sent = 0
             buffer = bytearray()
-            loop_condition = loop_condition if callable(loop_condition) else (lambda: True)
 
-            while (not reader.at_eof()) and loop_condition():
+            while not reader.at_eof():
                 data = await asyncio.wait_for(reader.read(4096), timeout=timeout)
                 if not data:
                     break

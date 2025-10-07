@@ -30,7 +30,6 @@ class HTTP_WS_Wrapper(Wrapper):
         if not os.path.isfile(http_response_file):
             raise FileNotFoundError(f"HTTP response file '{http_response_file}' not found")
         self.http_file_path = http_response_file
-        self.http_content_length = len(self.http_response.encode())
 
         self._mask_offset = 0
         self.ERROR400 = b'''HTTP/1.1 400 Bad Request
@@ -170,13 +169,14 @@ Connection: close
             if path == '/' + self.icon_path.name:
                 await self.handle_favicon(reader, writer)
             elif path == self.http_path:
+                res = self.http_response
                 response = (
                     "HTTP/1.1 200 OK\r\n"
                     "Content-Type: text/html; charset=utf-8\r\n"
-                    f"Content-Length: {self.http_content_length}\r\n"
+                    f"Content-Length: {len(res.encode())}\r\n"
                     "Connection: close\r\n"
                     "\r\n"
-                    f"{self.http_response}"
+                    f"{res}"
                 )
 
                 writer.write(response.encode())

@@ -39,7 +39,8 @@ class Socks5Client:
         self.sessions = []
 
     async def handshake(self, proxy_host: str = '127.0.0.1', proxy_port: int = 1080, username: Optional[str] = None,
-                        password: Optional[str] = None, logging: bool = True) -> 'TCP_ProxySession':
+                        password: Optional[str] = None, logging: bool = True,
+                        session_class = TCP_ProxySession) -> 'TCP_ProxySession':
         reader, writer = await asyncio.open_connection(proxy_host, proxy_port)
         try:
             cipher = self.ciphers[self.cipher_index]
@@ -49,7 +50,7 @@ class Socks5Client:
         except IndexError:
             raise IndexError(f'Invalid cipher index choosed: {self.cipher_index} of list {self.ciphers}')
 
-        session = TCP_ProxySession(self, reader, writer, cipher, proxy_host, proxy_port,
+        session = session_class(self, reader, writer, cipher, proxy_host, proxy_port,
                                    username=username, password=password, log_bytes=self.log_bytes)
         self.sessions.append(session)
         if logging:
@@ -198,6 +199,7 @@ class Socks5Client:
     def __str__(self):
         return f'{self.__class__.__name__}({len(self.sessions)} connections, cipher={self.ciphers[0].__class__.__name__})'
 
+
 class TCP_ProxySession:
     def __init__(self, client: Socks5Client, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
                  cipher: 'Cipher', host: str, port: int, username: str = '', password: str = '', log_bytes: bool = False):
@@ -337,6 +339,9 @@ class TCP_ProxySession:
             kwargs.pop('sep')
         return await self.areaduntil(self.reader, sep='\n', decrypt=decrypt, log_bytes=log_bytes, limit=limit, **kwargs)
 
+
+    def get_sockname(self) -> Tuple[str, int]:
+        return self.writer.get_extra_info("sockname")
 
     async def close(self):
         try:
@@ -552,8 +557,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
         self.local_server = None
 
-    async def async_listen_and_forward(self, local_host: str = '127.0.0.1', local_port: int = 1080,
-                                       log_bytes: bool = False):
+    async def async_listen_and_forward(self, local_host: str = '127.0.0.1', local_port: int = 1080):
         try:
             self.server_is_available = await self.ping(proxy_host=self.remote_host, proxy_port=self.remote_port,
                                                        username=self.username, password=self.password)
@@ -583,7 +587,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
             self.logger.info('Client closed by user')
 
 
-    async def CONNECT(self, addr: str, port: int, default_cipher: Cipher, remote_session: TCP_ProxySession) -> int:
+    async def filter_addr(self, addr: str, port: int) -> bool:
         if (addr == '0.0.0.0' and port == 0) or (addr.startswith('192.168') or addr.startswith('10.') or
                                                  addr.startswith('127.')) or addr == self.remote_host:
             self.logger.debug(
@@ -605,6 +609,11 @@ class Socks5_TCP_Retranslator(Socks5Client):
                     await client_writer.drain()
                 except:
                     pass
+            return False
+        return True
+
+    async def CONNECT(self, addr: str, port: int, default_cipher: Cipher, remote_session: TCP_ProxySession) -> int:
+        if not (await self.filter_addr(addr, port)):
             return 1
 
         cmd_bytes = await remote_session.cipher.client_command(
@@ -620,7 +629,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
         self.logger.debug(f"Establishing TCP connection to {addr}:{port}...")
 
         try:
-            local_ip, local_port = remote_session.writer.get_extra_info("sockname")
+            local_ip, local_port = remote_session.get_sockname()
             reply_frames = await default_cipher.server_make_reply(
                 self.socks_version, REPLYES_CODES['succeeded'], local_ip, local_port
             )
@@ -637,16 +646,6 @@ class Socks5_TCP_Retranslator(Socks5Client):
             except:
                 pass
             return 1
-
-        try:
-            await asyncio.gather(
-                self.pipe(self, client_reader, remote_session.writer, encrypt=remote_session.cipher.encrypt,
-                          name='client -> server'),
-                self.pipe(self, remote_session.reader, client_writer, decrypt=remote_session.cipher.decrypt,
-                          name='client <- server'),
-            )
-        except (ConnectionResetError, OSError):
-            pass
 
         try:
             t1 = asyncio.create_task(self.pipe(self, client_reader, remote_session.writer,
@@ -770,7 +769,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
     async def handle_local_client(self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter):
         try:
-            addr, port, command, default_cipher = self.listen_local_cmd(client_reader, client_writer, default_cipher)
+            addr, port, command, default_cipher = await self.listen_local_cmd(client_reader, client_writer)
         except Exception as e:
             self.logger.error(
                 f"Can not do handshake to local proxy {self.local_server.host}:{self.local_server.port} — {e}"
@@ -798,9 +797,18 @@ class Socks5_TCP_Retranslator(Socks5Client):
                 pass
             return
 
-        status_code = await command(addr, port, default_cipher, remote_session)
-        self.logger.debug(f"Connection to {addr}:{port} is closed, code: {status_code}")
-        await self.close_writer(client_writer)
+        try:
+            status_code = await command(addr, port, default_cipher, remote_session)
+            self.logger.debug(f"Connection to {addr}:{port} is closed, code: {status_code}")
+            await self.close_writer(client_writer)
+        except Exception as e:
+            self.logger.error(f"Running client cmd error {self.remote_host}:{self.remote_port} — {e}")
+            try:
+                client_writer.close()
+                await client_writer.wait_closed()
+            except:
+                pass
+            return
         try:
             await remote_session.close()
         except:
