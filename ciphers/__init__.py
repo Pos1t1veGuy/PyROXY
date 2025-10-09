@@ -624,7 +624,7 @@ class ChaCha20_Poly1305(Cipher):
                 addr_data = ip.packed
                 length = 16
 
-        except addr_data:
+        except ValueError:
             addr_bytes = address.encode('idna')
             length = len(addr_bytes)
             if length > 255:
