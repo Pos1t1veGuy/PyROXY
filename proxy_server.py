@@ -156,9 +156,11 @@ class Socks5Server:
             if await self.trace_event(default_cipher.server_hello(self, reader, writer), event_name=f'SERVER_HELLO'):
                 self.logger.debug(f"Sent server_hello of {default_cipher.wrapper.__class__.__name__}")
                 try:
-                    cipher = await self.trace_event(default_cipher.server_get_cipher(self, self.ciphers, reader, writer),
-                                                    event_name=f'GETTING_CIPHER')
-                    self.logger.debug(f"Client choosed a cipher {cipher.__class__.__name__}")
+                    cipher, proxying_mode = await self.trace_event(
+                        default_cipher.server_start_handshake(self, self.ciphers, reader, writer),
+                        event_name=f'GETTING_CIPHER'
+                    )
+                    self.logger.debug(f"Client choosed a cipher {cipher.__class__.__name__}, proxying mode is {proxying_mode}")
                     user, cipher = await self.handshake(reader, writer, cipher, default_cipher, user=user)
                 except ConnectionError as e:
                     self.logger.error(f'Suspicious client tried to connect: {user} => {e}')

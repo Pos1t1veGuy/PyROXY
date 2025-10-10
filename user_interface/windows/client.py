@@ -5,10 +5,12 @@ import threading
 import ctypes, sys
 import signal
 import subprocess
+import traceback
 from pathlib import Path
 from logging.handlers import TimedRotatingFileHandler
 
 from pyroxy.proxy_client import Socks5_TCP_Retranslator
+from pyroxy.mux_client import Socks5_TCP_Mux_Retranslator
 from pyroxy.ciphers import *
 from pyroxy.wrappers import HTTP_WS_Wrapper
 from pyroxy.tunnel import Tun2Socks
@@ -131,6 +133,9 @@ def main():
     except KeyboardInterrupt:
         pass
     except Exception as ex:
+        if args.logging_level.lower() == "debug":
+            print("[!] Full traceback:")
+            traceback.print_exc()
         print(f'[e] {ex}')
     finally:
         print('[+] client closed')

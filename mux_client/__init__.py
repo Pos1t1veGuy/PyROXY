@@ -7,11 +7,63 @@ from ..base_cipher import Cipher
 from ..proxy_client import Socks5Client, Socks5_TCP_Retranslator, TCP_ProxySession
 
 
+class MuxStreamReader:
+    def __init__(self, mux: 'MuxSession', stream_id: int, max_queue=100):
+        self.mux = mux
+        self.stream_id = stream_id
+        self.queue = asyncio.Queue(maxsize=max_queue)
+        self.eof = False
+        self._buffer = b""
+
+    async def _feed_data(self, data: Optional[bytes]):
+        if data is None:
+            self.eof = True
+            await self.queue.put(None)
+        else:
+            await self.queue.put(data)
+
+    async def readexactly(self, n: int) -> bytes:
+        chunks = []
+        got = 0
+
+        if self._buffer:
+            chunks.append(self._buffer[:n])
+            got = len(chunks[0])
+            self._buffer = self._buffer[n:]
+            if got >= n:
+                return b"".join(chunks)
+
+        while got < n:
+            piece = await self.queue.get()
+            if not piece: # EOF
+                raise asyncio.IncompleteReadError(b''.join(chunks), n)
+            need = n - got
+            if len(piece) > need:
+                chunks.append(piece[:need])
+                rest = piece[need:]
+                self._buffer = rest + getattr(self, "_buffer", b"")
+                got += need
+            else:
+                chunks.append(piece)
+                got += len(piece)
+        return b''.join(chunks)
+
+    async def read(self, n: int = -1) -> bytes:
+        if n < 0:
+            data = await self.queue.get()
+            return data if not data is None else b''
+        return await self.readexactly(n)
+
+    def at_eof(self):
+        return self.eof and self.queue.empty()
+
+
 class MuxStream:
-    def __init__(self, mux: "MuxSession", stream_id: int, cipher: Cipher):
+    def __init__(self, mux: "MuxSession", stream_id: int, cipher: Cipher, max_queue: int = 100):
         self.mux = mux
         self.cipher = cipher
         self.stream_id = stream_id
+        self.reader = MuxStreamReader(mux, stream_id, max_queue=max_queue)
         self.queue = asyncio.Queue()
         self.closed = False
 
@@ -30,9 +82,10 @@ class MuxStream:
 
     async def arecv(self) -> Optional[bytes]:
         if self.closed:
-            return None
-        data = await self.queue.get()
-        if data is None:
+            raise ConnectionError("Stream is closed")
+
+        data = await self.reader.read()
+        if not data:
             self.closed = True
         return b''.join(self.cipher.decrypt(data))
 
@@ -42,7 +95,7 @@ class MuxStream:
     async def close(self):
         if not self.closed:
             await self.mux._send_frame(self.stream_id, 0x01, b"")  # FIN
-            self.queue.put_nowait(None)
+            await self.reader._feed_data(None)
             self.closed = True
 
 class TCP_MuxSession:
@@ -77,6 +130,10 @@ class TCP_MuxSession:
         self.streams[stream_id] = stream
         return stream
 
+    async def close_stream(self, stream_id: int):
+        await self.streams[stream_id].close()
+        self.streams.pop(stream_id)
+
     async def _send_frame(self, stream_id: int, flags: int, payload: bytes):
         async with self._writer_lock:
             self.writer.write(self.HEADER_STRUCT.pack(stream_id, flags, len(payload)) + payload)
@@ -96,11 +153,11 @@ class TCP_MuxSession:
                     continue
 
                 if flags & 0x01:  # FIN
-                    stream.queue.put_nowait(None)
+                    await stream.reader._feed_data(None)
                     stream.closed = True
                     self.streams.pop(stream_id, None)
                 else:
-                    stream.queue.put_nowait(payload)
+                    await stream.reader._feed_data(payload)
         except asyncio.IncompleteReadError:
             await self.close()
 
@@ -114,7 +171,7 @@ class TCP_MuxSession:
         except asyncio.CancelledError:
             pass
         for stream in list(self.streams.values()):
-            stream.queue.put_nowait(None)
+            await stream.reader._feed_data(None)
         self.streams.clear()
         try:
             self.writer.close()
@@ -129,6 +186,13 @@ class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
         self.mux_workers = mux_workers
         self.mux_sessions = []
 
+        self.server_commands = {
+            # 0x00: self.PING,
+            0x01: self.CONNECT,
+            0x02: self.BIND,
+            0x03: self.UDP_ASSOCIATE,
+        }
+
     async def async_listen_and_forward(self, local_host: str = '127.0.0.1', local_port: int = 1080):
         for i in range(self.mux_workers):
             tcp_session = await self.handshake(
@@ -137,11 +201,25 @@ class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
             self.mux_sessions.append(
                 TCP_MuxSession(self, tcp_session, self.remote_host, self.remote_port, mux_name=f'MuxSession{i}')
             )
-        super().async_listen_and_forward(local_host=local_host, local_port=local_port)
+
+        asyncio.create_task(self.monitor_mux())
+        await super().async_listen_and_forward(local_host=local_host, local_port=local_port)
+
+
+    async def monitor_mux(self):
+        while True:
+            for i, session in enumerate(list(self.mux_sessions)):
+                if session.closed:
+                    self.logger.warning(f"Reconnecting MUX {i}...")
+                    tcp_session = await self.handshake(proxy_host=self.remote_host, proxy_port=self.remote_port,
+                                                       username=self.username, password=self.password)
+                    self.mux_sessions[i] = TCP_MuxSession(self, tcp_session, self.remote_host, self.remote_port,
+                                                          mux_name=f"MuxSession{i}")
+            await asyncio.sleep(3)
 
     async def handle_local_client(self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter):
         try:
-            addr, port, command, default_cipher = await self.listen_local_cmd(client_reader, client_writer)
+            addr, port, command, default_cipher, user = await self.listen_local_cmd(client_reader, client_writer)
         except Exception as e:
             self.logger.error(
                 f"Can not do handshake to local proxy {self.local_server.host}:{self.local_server.port} — {e}"
@@ -150,6 +228,8 @@ class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
 
         try:
             remote_stream = await self.mux_sessions[0].open_stream() # Потом надо распределить и открывать стрим в самой незабитой сессии
+            # mux = min(self.mux_sessions, key=lambda s: len(s.streams))
+            # remote_stream = await mux.open_stream()
             self.logger.debug('Client handshaked with remote server')
         except ConnectionRefusedError:
             self.logger.error(f"Can not connect to remote proxy {self.remote_host}:{self.remote_port}")
@@ -158,13 +238,13 @@ class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
             self.logger.error(f"Can not do handshake to remote proxy {self.remote_host}:{self.remote_port} — {e}")
             return
 
-        try:
-            status_code = await command(addr, port, default_cipher, remote_stream, client_reader, client_writer)
-            self.logger.debug(f"Connection to {addr}:{port} is closed, code: {status_code}")
-            await self.close_writer(client_writer)
-        except Exception as e:
-            self.logger.error(f"Running client cmd error {self.remote_host}:{self.remote_port} — {e}")
-            return
+        # try:
+        status_code = await command(user, addr, port, default_cipher, remote_stream, client_reader, client_writer)
+        self.logger.debug(f"Connection to {addr}:{port} is closed, code: {status_code}")
+        await self.close_writer(client_writer)
+        # except Exception as e:
+        #     self.logger.error(f"Running client cmd error {self.remote_host}:{self.remote_port} — {e}")
+        #     return
 
     async def mux_pipe(self, client: Union[asyncio.StreamWriter, asyncio.StreamReader], remote_session: MuxStream,
                        name: str = 'default', encrypt: Optional[callable] = None, decrypt: Optional[callable] = None,
@@ -212,42 +292,19 @@ class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
         return bytes_sent, bytes_received
 
 
-    async def client_confirm_cmd(self, remote_session: MuxStream) -> Tuple[str, int]:
-        data = await remote_session.arecv()
-        ver, rep, rsv, atyp = data[:4]
-
-        if ver != 0x05:
-            raise ConnectionError(f"Invalid SOCKS version in reply: {ver}")
-        if rep != 0x00:
-            raise ConnectionError(f"SOCKS5 request failed {REPLYES[rep]}")
-
-        if atyp == 0x01:  # IPv4
-            address = socket.inet_ntoa(data[4:8])
-            port_bytes = data[8:10]
-        elif atyp == 0x03:  # Domain
-            domain_len = int.from_bytes(data[4])
-            address = data[5:5+domain_len].decode('idna')
-            port_bytes = data[5+domain_len:5+domain_len+2]
-        elif atyp == 0x04:  # IPv6
-            address = socket.inet_ntoa(data[4:20])
-            port_bytes = data[20:22]
-        else:
-            raise ConnectionError(f"Invalid ATYP in reply: {atyp}")
-
-        return address, struct.unpack('!H', port_bytes)[0]
-
-
-    async def CONNECT(self, addr: str, port: int, default_cipher: Cipher, remote_session: MuxStream,
+    async def CONNECT(self, user: 'User', addr: str, port: int, default_cipher: Cipher, remote_session: MuxStream,
                       client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter) -> int:
-        if not (await self.filter_addr(addr, port)):
+        if not (await self.filter_addr(user, addr, port)):
             return 1
 
         cmd_bytes = await remote_session.cipher.client_command(
             self.socks_version, self.user_commands['connect'], addr, port
         )
-        await remote_session.asend(cmd_bytes)
+        await self.trace_event(remote_session.asend(b''.join(cmd_bytes), encrypt=False), event_name='CLIENT_CMD_SEND')
         try:
-            address, port = await self.client_connect_confirm(remote_session)
+            address, port = await self.trace_event(
+                remote_session.cipher.client_connect_confirm(remote_session.reader), event_name='SERVER_CMD_CONFIRM'
+            )
         except ConnectionError as e:
             self.logger.error(e)
             return 1
@@ -274,10 +331,10 @@ class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
             return 1
 
         try:
-            t1 = asyncio.create_task(self.mux_pipe(self, client_reader, remote_session,
-                                               encrypt=remote_session.cipher.encrypt, name='client -> server'))
-            t2 = asyncio.create_task(self.mux_pipe(self, client_writer, remote_session,
-                                               decrypt=remote_session.cipher.decrypt, name='client <- server'))
+            t1 = asyncio.create_task(self.mux_pipe(client_reader, remote_session, encrypt=remote_session.cipher.encrypt,
+                                                   name='client -> server'))
+            t2 = asyncio.create_task(self.mux_pipe(client_writer, remote_session, decrypt=remote_session.cipher.decrypt,
+                                                   name='client <- server'))
             done, pending = await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
         except (ConnectionResetError, OSError):
             pass

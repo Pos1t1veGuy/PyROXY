@@ -19,7 +19,7 @@ which typically consists of 4–7 stages. This class defines symmetric methods f
 ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
 [ CLIENT SIDE ]                         [ SERVER SIDE ]
 ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬
-0. client_send_methods →              → server_get_methods
+0. client_start_handshake →              → server_start_handshake
    - *If you want it will custom start of your handshake. By default it is empty.
    
 1. client_send_methods →              → server_get_methods
@@ -146,16 +146,18 @@ class Cipher:
     def copy(self) -> 'Cipher':
         return self.__class__(*self._init_args, **self._init_kwargs)
 
-    async def client_send_cipher(self, client: 'Socks5Client', cipher_index: int, reader: asyncio.StreamReader,
-                           writer: asyncio.StreamWriter) -> bool:
-        writer.write(cipher_index.to_bytes(1, 'big'))
+    async def client_start_handshake(self, client: 'Socks5Client', cipher_index: int, proxying_mode: int,
+                                 reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
+        # [cipher index byte] + [proxying mode byte]
+        writer.write(struct.pack("!BB", cipher_index, proxying_mode))
         await writer.drain()
         response = (await reader.readexactly(1))[0]
         return response == 0
 
-    async def server_get_cipher(self, server: 'Socks5Server', ciphers: List['Cipher'], reader: asyncio.StreamReader,
-                           writer: asyncio.StreamWriter) -> Optional['Cipher']:
-        index = (await reader.readexactly(1))[0]
+    async def server_start_handshake(self, server: 'Socks5Server', ciphers: List['Cipher'], reader: asyncio.StreamReader,
+                           writer: asyncio.StreamWriter) -> Tuple['Cipher', int]:
+        # [cipher index byte] + [proxying mode byte]
+        index, mode = struct.unpack("!BB", await reader.readexactly(2))
         try:
             cipher = ciphers[index]
         except IndexError:
@@ -165,7 +167,7 @@ class Cipher:
 
         writer.write(b'\x00')
         await writer.drain()
-        return cipher.copy()
+        return cipher.copy(), mode
 
     async def client_send_methods(self, socks_version: int, methods: List[int]) -> List[bytes]:
         return [bytes([
