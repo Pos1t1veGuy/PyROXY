@@ -96,14 +96,17 @@ class MuxStream:
                 await self.asend(frame, encrypt=encrypt, log_bytes=log_bytes)
 
         else:
-            if encrypt:
-                for cryptoframe in self.cipher.encrypt(data):
-                    await self.writer.write(cryptoframe)
-            else:
-                await self.writer.write(data)
-            self.bytes_sent += len(data)
+            try:
+                if encrypt:
+                    for cryptoframe in self.cipher.encrypt(data):
+                        await self.writer.write(cryptoframe)
+                else:
+                    await self.writer.write(data)
+                self.bytes_sent += len(data)
 
-            await self.writer.drain()
+                await self.writer.drain()
+            except ConnectionResetError:
+                await self.close()
 
     async def drain(self):
         await self.mux._drain()

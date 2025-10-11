@@ -3,6 +3,8 @@ import socket
 import struct
 import asyncio
 import logging
+import aiohttp
+import json
 import ipaddress as ipa
 from functools import lru_cache
 
@@ -130,6 +132,33 @@ def get_address(data: bytes, address_type: int) -> Tuple[str, int]:
         case _:
             raise ConnectionError(f"Invalid address: {address_type}, it must be 0x01/0x03/0x04")
     return addr, port
+
+async def resolve_doh(domain: str, resolver_urls: Optional[list[str]] = None) -> list[str]:
+    """
+    Resolves a domain name using DNS over HTTPS (DoH).
+    Returns a list of IPv4 addresses.
+    """
+    if not resolver_urls:
+        resolver_urls = [
+            "https://1.1.1.1/dns-query?name={domain}",
+            "https://8.8.8.8/dns-query?name={domain}",
+            "https://9.9.9.9/dns-query?name={domain}"
+        ]
+
+    headers = {"accept": "application/dns-json"}
+
+    for url in resolver_urls:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url.format(domain=f"{domain}&type=A"), headers=headers, timeout=3) as resp:
+                    if resp.status != 200:
+                        continue
+                    text = await resp.text()
+                    data = json.loads(text)
+                    return [a["data"] for a in data.get("Answer", []) if a["type"] == 1]
+        except:
+            continue
+    raise RuntimeError(f"Cannot resolve {domain} via DoH resolvers")
 
 
 class Cipher:
@@ -264,7 +293,9 @@ class Cipher:
         return struct.pack("!BBBB", socks_version, user_command, 0x00, atyp) + addr_bytes + struct.pack("!H", target_port)
 
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
-                             reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:
+                                    reader: asyncio.StreamReader,
+                                    address_resolver: Callable[[bytes, int], Tuple[str, int]] = get_address
+                                    ) -> Tuple[str, int, Callable]:
 
         version, cmd, rsv, address_type = await reader.readexactly(4)
         if version != socks_version:
@@ -285,7 +316,7 @@ class Cipher:
             case _:
                 raise ConnectionError(f"Invalid address: {address_type}, it must be 0x01/0x03/0x04")
 
-        return *get_address(addr_bytes, address_type), cmd
+        return *address_resolver(addr_bytes, address_type), cmd
 
     async def server_make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> List[bytes]:
         address_type = 0x01

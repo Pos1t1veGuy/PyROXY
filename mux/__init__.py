@@ -2,7 +2,7 @@ from pyroxy import Cipher
 from typing import *
 import asyncio
 
-from .core import TCP_MuxSession
+from .core import TCP_MuxSession, MuxStream
 from ..proxy_client import Socks5_TCP_Retranslator
 from ..proxy_server import Socks5Server
 

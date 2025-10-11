@@ -8,7 +8,10 @@ import ipaddress
 import netifaces
 import json
 import psutil
+import asyncio
 from pathlib import Path
+
+from ..base_cipher import resolve_doh
 
 
 class Tun2Socks:
@@ -16,7 +19,7 @@ class Tun2Socks:
     def_iface_id = None
     tun_proc = None
 
-    def __init__(self, socks_ext: str, tun_name: str = "wintun", interface_ip: str = '10.0.0.1',
+    def __init__(self, socks_ext: str, tun_name: str = "wintun", interface_ip: str = '10.0.0.1', white_list: List[str] = [],
                  path_to_exe: Optional[str] = None, interface_mask: str = '255.255.255.255', silent: bool = True):
         self.path_to_exe = Path(path_to_exe) if path_to_exe else Path(__file__).parent / "tun2socks.exe"
         self.tun_name = tun_name
@@ -24,6 +27,7 @@ class Tun2Socks:
         self.interface_mask = interface_mask
         self.socks_ext = socks_ext
         self.silent = silent
+        self.white_list = white_list
 
     def get_used_ips(self) -> Set[str]:
         used = set()
@@ -108,7 +112,7 @@ class Tun2Socks:
                 pass
 
 
-    def start(self, socks_local: str = '127.0.0.1', socks_local_port: int = 1080):
+    def start(self, socks_local: str = '127.0.0.1', socks_local_port: int = 1080, resolver_urls: List[str] = []):
         if self.tun_proc: return
 
         if self.tun_started():
@@ -130,20 +134,17 @@ class Tun2Socks:
 
         gws = netifaces.gateways()
         default_gateway = gws.get('default', {}).get(netifaces.AF_INET)
-        if default_gateway:
-            self.gateway_ip, interface_name = default_gateway
-            self.def_iface_id = self.get_interface_index_by_gateway(self.gateway_ip)[0]
-            if self.def_iface_id:
-                self.cmd_run(
-                    f'route add {self.socks_ext} mask 255.255.255.255 {self.gateway_ip} metric 1 if {self.def_iface_id}'
-                )
-            else:
-                print(f'[e] can not find LAN gateway id by IP {self.gateway_ip}')
-                sys.exit(1)
-        else:
+        if not default_gateway:
             print('[e] can not find LAN gateway IP')
             sys.exit(1)
 
+        self.gateway_ip, interface_name = default_gateway
+        self.def_iface_id = self.get_interface_index_by_gateway(self.gateway_ip)[0]
+        if not self.def_iface_id:
+            print(f'[e] can not find LAN gateway id by IP {self.gateway_ip}')
+            sys.exit(1)
+
+        self.cmd_run(f'route add {self.socks_ext} mask 255.255.255.255 {self.gateway_ip} metric 1 if {self.def_iface_id}')
         self.interface_ip, self.interface_mask = self.find_free_ip(self.interface_ip, self.interface_mask)
 
         self.cmd_run(
@@ -158,7 +159,21 @@ class Tun2Socks:
             print(f'[e] tun2socks "{self.tun_name}" interface not found')
             sys.exit(1)
 
-        self.cmd_run(f'route add 0.0.0.0 mask 0.0.0.0 {self.interface_ip} metric 1 if {iface_id}')
+        if self.white_list in ([], ['']):
+            self.cmd_run(f'route add 0.0.0.0 mask 0.0.0.0 {self.interface_ip} metric 1 if {iface_id}')
+            print(f'[+] Routed all ips via tun2socks tunnel')
+        else:
+            for host in self.white_list:
+                try:
+                    if re.match(r'^\d+\.\d+\.\d+\.\d+$', host):
+                        ips = [host]
+                    else:
+                        ips = asyncio.run(resolve_doh(host, resolver_urls=resolver_urls))
+                    for ip in ips:
+                        self.cmd_run(f'route add {ip} mask 255.255.255.255 {self.interface_ip} metric 1 if {iface_id}')
+                        print(f'[+] Routed "{host}" ({ip}) via tunnel')
+                except Exception as e:
+                    print(f'[!] Failed to route "{host}": {e}')
 
 
     def stop(self):

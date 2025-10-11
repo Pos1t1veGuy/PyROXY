@@ -151,7 +151,9 @@ class AES_CTR(Cipher):
         )
 
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
-                                    reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:
+                                    reader: asyncio.StreamReader,
+                                    address_resolver: Callable[[bytes, int], Tuple[str, int]] = get_address
+                                    ) -> Tuple[str, int, Callable]:
 
         version, cmd, rsv, address_type = b''.join(self.decrypt(await reader.readexactly(4)))
         if version != socks_version:
@@ -172,7 +174,7 @@ class AES_CTR(Cipher):
             case _:
                 raise ConnectionError(f"Invalid address: {address_type}, it must be 0x01/0x03/0x04")
 
-        return *get_address(addr_bytes, address_type), cmd
+        return *address_resolver(addr_bytes, address_type), cmd
 
     async def server_make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> List[bytes]:
         return self.encrypt(
@@ -366,7 +368,9 @@ class AES_CBC(Cipher): # ДОДЕЛАТЬ ЭТО ДЕРЬМИЩЕ!!!!!!!!!!
         )
 
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
-                                        reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:
+                                    reader: asyncio.StreamReader,
+                                    address_resolver: Callable[[bytes, int], Tuple[str, int]] = get_address
+                                    ) -> Tuple[str, int, Callable]:
 
         data = b''.join(self.decrypt(await reader.readexactly(AES.block_size)))
         for _ in range(self.blocks_count): # CBC decrypt makes self.blocks_count
@@ -380,7 +384,7 @@ class AES_CBC(Cipher): # ДОДЕЛАТЬ ЭТО ДЕРЬМИЩЕ!!!!!!!!!!
             raise ConnectionError(f"Unsupported command: {cmd}, it must be one of {list(user_command_handlers.keys())}")
         cmd = user_command_handlers[cmd]
 
-        return *get_address(data[5:], address_type), cmd
+        return *address_resolver(data[5:], address_type), cmd
 
     async def server_make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> bytes:
         address_type = 0x01
@@ -593,7 +597,9 @@ class ChaCha20_Poly1305(Cipher):
         return first_block + second_block
 
     async def server_handle_command(self, socks_version: int, user_command_handlers: Dict[int, Callable],
-                                    reader: asyncio.StreamReader) -> Tuple[str, int, Callable]:
+                                    reader: asyncio.StreamReader,
+                                    address_resolver: Callable[[bytes, int], Tuple[str, int]] = get_address
+                                    ) -> Tuple[str, int, Callable]:
 
         first_block = await reader.readexactly(5 + self.overhead_length)
         version, cmd, rsv, address_type, address_length = b''.join(self.decrypt(first_block))
@@ -606,7 +612,7 @@ class ChaCha20_Poly1305(Cipher):
 
 
         data = b''.join(self.decrypt(await reader.readexactly(address_length + self.overhead_length)))
-        return *get_address(data, address_type), cmd
+        return *address_resolver(data, address_type), cmd
 
     async def server_make_reply(self, socks_version: int, reply_code: int, address: str = '0', port: int = 0) -> bytes:
         address_type = 0x01

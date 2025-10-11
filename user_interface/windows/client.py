@@ -10,7 +10,7 @@ from pathlib import Path
 from logging.handlers import TimedRotatingFileHandler
 
 from pyroxy.proxy_client import Socks5_TCP_Retranslator
-from pyroxy.mux_client import Socks5_TCP_Mux_Retranslator
+from pyroxy.mux import Socks5_TCP_Mux_Retranslator
 from pyroxy.ciphers import *
 from pyroxy.wrappers import HTTP_WS_Wrapper
 from pyroxy.tunnel import Tun2Socks
@@ -65,6 +65,7 @@ def main():
     parser.add_argument("--local_host", default='127.0.0.1', help="Local client (retranslator) host")
     parser.add_argument("--local_port", type=int, default=1080, help="Local client (retranslator) port")
 
+    parser.add_argument("--white_list_file", default='white_list.txt', help="List of domens or ips thats needs to proxy")
     parser.add_argument("--log_file", type=int, choices=[1,0], default=0, help="Enable logger file (0 - false, 1 - true)")
     parser.add_argument("--tunnel_debug", type=int, choices=[1,0], default=0, help="Enable tunnel log (0 - false, 1 - true)")
     parser.add_argument("--logging_level", choices=logging_levels, default='info', help="Application logging level")
@@ -82,7 +83,17 @@ def main():
 
     args = parser.parse_args()
 
-    tunnel = Tun2Socks(args.host, path_to_exe=args.tun2socks_path, silent=not bool(args.tunnel_debug))
+    white_list = []
+    if os.path.isfile(args.white_list_file):
+        try:
+            white_list = open(args.white_list_file, 'r').read().split('\n')
+        except Exception as ex:
+            print(f'[e] Error when open white list file: {ex}')
+    else:
+        open(args.white_list_file, 'w')
+
+    tunnel = Tun2Socks(args.host, white_list=white_list, path_to_exe=args.tun2socks_path,
+                       silent=not bool(args.tunnel_debug))
     if args.auto_forward_traffic == 1:
         tunnel.stop() # to delete broken routes
         print('[+] Auto forward enabled')
