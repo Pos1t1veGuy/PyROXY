@@ -368,6 +368,8 @@ class TCP_ProxySession:
 
     def __str__(self):
         return f'{self.__class__.__name__}(host={self.host}, port={self.port})'
+    def __repr__(self):
+        return f'<{self.__class__.__name__} host={self.host} port={self.port}>'
 
 class UDP_ProxySession(asyncio.DatagramProtocol):
     def __init__(self, cipher: 'Cipher', dst_ip: str, dst_port: int):
@@ -472,6 +474,8 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
 
     def __str__(self):
         return f'{self.__class__.__name__}(host="{self.host}", port={self.port})'
+    def __repr__(self):
+        return f'<{self.__class__.__name__} host={self.host} port={self.port}>'
 
 
 class Socks5_UDP_Retranslator(UDP_ProxySession):
@@ -549,6 +553,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
         self.pipe = Socks5Server.pipe
         self.close_writer = Socks5Server.close_writer
         self.server_commands = {
+            0x00: self.PING,
             0x01: self.CONNECT,
             0x02: self.BIND,
             0x03: self.UDP_ASSOCIATE,
@@ -589,6 +594,54 @@ class Socks5_TCP_Retranslator(Socks5Client):
             self.logger.info('Client closed by user')
 
 
+    async def handle_local_client(self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter):
+        try:
+            addr, port, command, default_cipher, user = await self.listen_local_cmd(client_reader, client_writer)
+        except Exception as e:
+            self.logger.error(
+                f"Can not do handshake to local proxy {self.local_server.host}:{self.local_server.port} — {e}"
+            )
+            client_writer.close()
+            await client_writer.wait_closed()
+            return
+
+        try:
+            remote_session = await self.handshake(
+                proxy_host=self.remote_host, proxy_port=self.remote_port, username=self.username, password=self.password
+            )
+            self.logger.debug(f'Client {user} handshaked with remote server')
+        except ConnectionRefusedError:
+            self.logger.error(f"Can not connect to remote proxy {self.remote_host}:{self.remote_port}")
+            client_writer.close()
+            await client_writer.wait_closed()
+            return
+        except Exception as e:
+            self.logger.error(f"Can not do handshake to remote proxy {self.remote_host}:{self.remote_port} — {e}")
+            try:
+                client_writer.close()
+                await client_writer.wait_closed()
+            except:
+                pass
+            return
+
+        try:
+            status_code = await command(user, addr, port, default_cipher, remote_session, client_writer, client_reader)
+            self.logger.debug(f"Connection to {addr}:{port} is closed, code: {status_code}")
+            await self.close_writer(client_writer)
+        except Exception as e:
+            self.logger.error(f"Running client cmd error {self.remote_host}:{self.remote_port} — {e}")
+            try:
+                client_writer.close()
+                await client_writer.wait_closed()
+            except:
+                pass
+            return
+        try:
+            await remote_session.close()
+        except:
+            pass
+
+
     async def filter_addr(self, user: 'User', addr: str, port: int) -> bool:
         if (addr == '0.0.0.0' and port == 0) or (addr.startswith('192.168') or addr.startswith('10.') or
                                                  addr.startswith('127.')) or addr == self.remote_host:
@@ -613,6 +666,25 @@ class Socks5_TCP_Retranslator(Socks5Client):
                     pass
             return False
         return True
+
+    async def PING(self, user: 'User', addr: str, port: int, default_cipher: Cipher, remote_session: TCP_ProxySession,
+                      client_writer: asyncio.StreamWriter, client_reader: asyncio.StreamReader) -> int:
+        if not (await self.filter_addr(user, addr, port)):
+            return 1
+
+        cmd_bytes = await remote_session.cipher.client_command(
+            self.socks_version, self.user_commands['ping'], addr, port
+        )
+        await self.trace_event(remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False), event_name='CLIENT_CMD_SEND')
+        try:
+            address, port = await self.trace_event(
+                remote_session.cipher.client_connect_confirm(remote_session.reader), event_name='SERVER_CMD_CONFIRM'
+            )
+        except ConnectionError as e:
+            self.logger.error(e)
+            return 1
+
+        return 0
 
     async def CONNECT(self, user: 'User', addr: str, port: int, default_cipher: Cipher, remote_session: TCP_ProxySession,
                       client_writer: asyncio.StreamWriter, client_reader: asyncio.StreamReader) -> int:
@@ -652,35 +724,8 @@ class Socks5_TCP_Retranslator(Socks5Client):
                 pass
             return 1
 
-        try:
-            t1 = asyncio.create_task(self.pipe(self, client_reader, remote_session.writer,
-                                               encrypt=remote_session.cipher.encrypt, name='client -> server'))
-            t2 = asyncio.create_task(self.pipe(self, remote_session.reader, client_writer,
-                                               decrypt=remote_session.cipher.decrypt, name='client <- server'))
-            done, pending = await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
-        except (ConnectionResetError, OSError):
-            pass
-
-        for t in pending:
-            t.cancel()
-            try:
-                await t
-            except asyncio.CancelledError:
-                pass
-
-        c2s_bytes = [0, 0]
-        s2c_bytes = [0, 0]
-
-        if t1.done():
-            try:
-                c2s_bytes = t1.result()
-            except asyncio.CancelledError:
-                pass
-        if t2.done():
-            try:
-                s2c_bytes = t2.result()
-            except asyncio.CancelledError:
-                pass
+        await self.make_tcp_pipes(client_reader, remote_session.writer, remote_session.reader, client_writer,
+                                  remote_session.cipher.encrypt, remote_session.cipher.decrypt)
         
         return 0
 
@@ -777,49 +822,40 @@ class Socks5_TCP_Retranslator(Socks5Client):
         self.logger.info(f'Local client {user} sent command {command.__qualname__} to {addr}:{port}')
         return addr, port, command, default_cipher, user
 
-    async def handle_local_client(self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter):
+    async def make_tcp_pipes(self, client_reader: asyncio.StreamReader, remote_writer: asyncio.StreamWriter,
+                             remote_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter,
+                             encrypt: Callable[[bytes], List[bytes]], decrypt: Callable[[bytes], List[bytes]]
+                             ) -> Tuple:
         try:
-            addr, port, command, default_cipher, user = await self.listen_local_cmd(client_reader, client_writer)
-        except Exception as e:
-            self.logger.error(
-                f"Can not do handshake to local proxy {self.local_server.host}:{self.local_server.port} — {e}"
+            t1 = asyncio.create_task(
+                self.pipe(self, client_reader, remote_writer, encrypt=encrypt, name='client -> server')
             )
-            client_writer.close()
-            await client_writer.wait_closed()
-            return
-
-        try:
-            remote_session = await self.handshake(
-                proxy_host=self.remote_host, proxy_port=self.remote_port, username=self.username, password=self.password
+            t2 = asyncio.create_task(
+                self.pipe(self, remote_reader, client_writer, decrypt=decrypt, name='client <- server')
             )
-            self.logger.debug(f'Client {user} handshaked with remote server')
-        except ConnectionRefusedError:
-            self.logger.error(f"Can not connect to remote proxy {self.remote_host}:{self.remote_port}")
-            client_writer.close()
-            await client_writer.wait_closed()
-            return
-        except Exception as e:
-            self.logger.error(f"Can not do handshake to remote proxy {self.remote_host}:{self.remote_port} — {e}")
-            try:
-                client_writer.close()
-                await client_writer.wait_closed()
-            except:
-                pass
-            return
-
-        try:
-            status_code = await command(user, addr, port, default_cipher, remote_session, client_writer, client_reader)
-            self.logger.debug(f"Connection to {addr}:{port} is closed, code: {status_code}")
-            await self.close_writer(client_writer)
-        except Exception as e:
-            self.logger.error(f"Running client cmd error {self.remote_host}:{self.remote_port} — {e}")
-            try:
-                client_writer.close()
-                await client_writer.wait_closed()
-            except:
-                pass
-            return
-        try:
-            await remote_session.close()
-        except:
+            done, pending = await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
+        except (ConnectionResetError, OSError):
             pass
+
+        for t in pending:
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+
+        c2s_bytes = [0, 0]
+        s2c_bytes = [0, 0]
+
+        if t1.done():
+            try:
+                c2s_bytes = t1.result()
+            except asyncio.CancelledError:
+                pass
+        if t2.done():
+            try:
+                s2c_bytes = t2.result()
+            except asyncio.CancelledError:
+                pass
+
+        return c2s_bytes, s2c_bytes

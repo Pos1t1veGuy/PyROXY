@@ -167,6 +167,21 @@ class Socks5Server:
                     return
 
                 self.logger.info(f"{user} is connected with cipher {cipher.__class__.__name__}")
+                result_code = await self.proxy_client(user, cipher, proxying_mode, reader, writer)
+                self.logger.info(f'Сompleted the operation successfully, code: {result_code}')
+            else:
+                self.logger.warning(f'Suspicious client tried to connect: {user}')
+
+        except Exception as e:
+            self.logger.error(f"Connection error: {repr(e)}")
+
+        finally:
+            await user.disconnect()
+
+    async def proxy_client(self, user: 'User', cipher: Cipher, proxying_mode: int,
+                           reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> int:
+        match proxying_mode:
+            case 0:
                 addr, port, command = await self.trace_event(
                     cipher.server_handle_command(self.socks_version, self.user_commands, reader),
                     event_name=f'HANDLE_CLIENT_CMD'
@@ -183,8 +198,7 @@ class Socks5Server:
                             )
                             writer.write(b''.join(reply_frames))
                             await writer.drain()
-                            self.logger.info('Сompleted the operation successfully, code: 1')
-                            return
+                            return 1
 
                         self.clients_udp_servers[user.username] += 1
                     else:
@@ -200,16 +214,17 @@ class Socks5Server:
                         self.clients_udp_servers.pop(user.username)
                     else:
                         self.clients_udp_servers[user.username] -= 1
-                self.logger.info(f'Сompleted the operation successfully, code: {result_code}')
 
-            else:
-                self.logger.warning(f'Suspicious client tried to connect: {user}')
+                return result_code
 
-        except Exception as e:
-            self.logger.error(f"Connection error: {repr(e)}")
-
-        finally:
-            await user.disconnect()
+            case _:
+                reply_frames = await self.trace_event(
+                    cipher.server_make_reply(self.socks_version, REPLYES_CODES['not_allowed'], '0.0.0.0', 0),
+                    event_name=f'CMD_CONFIRM'
+                )
+                writer.write(b''.join(reply_frames))
+                await writer.drain()
+                return 1
 
     async def pipe(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, name: str = 'default',
                    encrypt: Optional[callable] = None, decrypt: Optional[callable] = None, timeout: int = 300
@@ -256,14 +271,16 @@ class Socks5Server:
             writer.close()
         except:
             pass
-        try:
-            await asyncio.wait_for(writer.wait_closed(), timeout=5.0)
-        except:
-            pass
-        try:
-            writer.transport.abort()
-        except:
-            pass
+
+        if type(writer) == asyncio.StreamWriter: # writer may be modified by developer and be not asyncio.StreamWriter
+            try:
+                await asyncio.wait_for(writer.wait_closed(), timeout=5.0)
+            except:
+                pass
+            try:
+                writer.transport.abort()
+            except:
+                pass
 
     async def send(self, user: 'User', data: Union[bytes, List[bytes]], log_bytes: bool = True):
         if isinstance(data, list):
