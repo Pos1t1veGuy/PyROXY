@@ -1,1 +1,3 @@
+# Put a domains or an IPs here
 2ip.ru
+ifconfig.me

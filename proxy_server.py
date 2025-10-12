@@ -5,6 +5,7 @@ import os
 import struct
 import socket
 import time
+import traceback
 
 from .logger_setup import *
 from .base_cipher import Cipher, REPLYES_CODES, get_address, resolve_domain, encode_ip
@@ -92,6 +93,8 @@ class Socks5Server:
         try:
             return await coro
         except Exception as ex:
+            if self.logger.isEnabledFor(logging.DEBUG):
+                traceback.print_exc()
             raise ex_class(f'Error when {event_name}: "{ex}"')
 
 
@@ -173,6 +176,8 @@ class Socks5Server:
                 self.logger.warning(f'Suspicious client tried to connect: {user}')
 
         except Exception as e:
+            if self.logger.isEnabledFor(logging.DEBUG):
+                traceback.print_exc()
             self.logger.error(f"Connection error: {repr(e)}")
 
         finally:
@@ -218,6 +223,7 @@ class Socks5Server:
                 return result_code
 
             case _:
+                self.logger.warning(f'{user} sent unsupported proxying mode index: {proxying_mode}')
                 reply_frames = await self.trace_event(
                     cipher.server_make_reply(self.socks_version, REPLYES_CODES['not_allowed'], '0.0.0.0', 0),
                     event_name=f'CMD_CONFIRM'
@@ -254,9 +260,7 @@ class Socks5Server:
                         self.bytes_sent += len(frame)
 
                 await writer.drain()
-        except asyncio.TimeoutError:
-            pass
-        except asyncio.CancelledError:
+        except (asyncio.TimeoutError, asyncio.CancelledError, asyncio.IncompleteReadError):
             pass
         except Exception as e:
             self.logger.error(f"Proxying PIPE '{name}' error: {repr(e)}")

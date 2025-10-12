@@ -86,11 +86,14 @@ def main():
     white_list = []
     if os.path.isfile(args.white_list_file):
         try:
-            white_list = open(args.white_list_file, 'r').read().split('\n')
+            white_list = [
+                domain for domain in open(args.white_list_file, 'r').read().split('\n')
+                if (not domain.startswith('#')) and (not domain.startswith(' #')) and (not domain in ['', ' '])
+            ]
         except Exception as ex:
             print(f'[e] Error when open white list file: {ex}')
     else:
-        open(args.white_list_file, 'w')
+        open(args.white_list_file, 'w').write('# Put a domains or an IPs here')
 
     tunnel = Tun2Socks(args.host, white_list=white_list, path_to_exe=args.tun2socks_path,
                        silent=not bool(args.tunnel_debug))
@@ -126,7 +129,7 @@ def main():
     ]
 
     try:
-        CLIENT = Socks5_TCP_Retranslator(
+        CLIENT = Socks5_TCP_Mux_Retranslator(
             args.host, int(args.port),
             cipher_index=ciphers_choices.index(args.cipher),
             ciphers=available_ciphers,

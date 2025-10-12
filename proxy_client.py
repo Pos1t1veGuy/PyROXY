@@ -1,4 +1,5 @@
 from typing import *
+import traceback
 import asyncio
 import socket
 import logging
@@ -132,7 +133,7 @@ class Socks5Client:
             self.logger.debug(f"Pong from proxy")
             return address == '0.0.0.0' and port == 0
         except Exception as ex:
-            self.logger.error(ex)
+            self.logger.debug(f'Ping received an error: {ex}')
             return False
 
     async def connect(self, target_host: str, target_port: int,
@@ -181,6 +182,8 @@ class Socks5Client:
         try:
             return await coro
         except Exception as ex:
+            if self.logger.isEnabledFor(logging.DEBUG):
+                traceback.print_exc()
             raise ex_class(f'Error when {event_name}: "{ex}"')
 
 
@@ -570,10 +573,13 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
         self.local_server = None
 
-    async def async_listen_and_forward(self, local_host: str = '127.0.0.1', local_port: int = 1080):
+    async def async_listen_and_forward(self, local_host: str = '127.0.0.1', local_port: int = 1080, ping: bool = True):
         try:
-            self.server_is_available = await self.ping(proxy_host=self.remote_host, proxy_port=self.remote_port,
+            if ping:
+                self.server_is_available = await self.ping(proxy_host=self.remote_host, proxy_port=self.remote_port,
                                                        username=self.username, password=self.password)
+            else:
+                self.server_is_available = True
 
             if self.server_is_available:
                 self.local_server = Socks5Server(host=local_host, port=local_port, accept_anonymous=True)
@@ -635,6 +641,8 @@ class Socks5_TCP_Retranslator(Socks5Client):
             self.logger.debug(f"Connection to {addr}:{port} is closed, code: {status_code}")
             await self.close_writer(client_writer)
         except Exception as e:
+            if self.logger.isEnabledFor(logging.DEBUG):
+                traceback.print_exc()
             self.logger.error(f"Running client cmd error {self.remote_host}:{self.remote_port} - {e}")
             try:
                 client_writer.close()
@@ -671,6 +679,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
         if not (await self.is_valid_connect_addr(user, addr, port)):
             return 1
 
+        self.logger.debug(f"Sending a selected command to server...")
         cmd_bytes = await remote_session.cipher.client_command(
             self.socks_version, self.user_commands['connect'], addr, port
         )
@@ -683,7 +692,6 @@ class Socks5_TCP_Retranslator(Socks5Client):
             self.logger.error(e)
             return 1
 
-        self.logger.debug(f"Establishing TCP connection to {addr}:{port}...")
 
         try:
             local_ip, local_port = remote_session.get_sockname()
@@ -704,6 +712,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
                 pass
             return 1
 
+        self.logger.debug(f"Establishing TCP connection to {addr}:{port}...")
         await self.make_tcp_pipes(client_reader, remote_session.writer, remote_session.reader, client_writer,
                                   remote_session.cipher.encrypt, remote_session.cipher.decrypt)
         

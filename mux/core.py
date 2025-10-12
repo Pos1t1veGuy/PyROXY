@@ -6,21 +6,57 @@ import itertools
 from ..base_cipher import Cipher
 
 
+def run_async(coro):
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    if loop.is_running():
+        task = asyncio.create_task(coro)
+        task.add_done_callback(lambda t: t.exception())
+    else:
+        loop.run_until_complete(coro)
+
+
+
 class MuxStreamWriter:
     def __init__(self, stream: 'MuxStream', mux: 'MuxSession'):
         self.mux = mux
         self.stream = stream
+        self._close_task: asyncio.Task | None = None
 
-    async def write(self, data: bytes):
+    async def awrite(self, data: bytes):
         if self.stream.closed:
             raise ConnectionError("Stream is closed")
         await self.mux._send_frame(self.stream.stream_id, 0x00, data)
+    def write(self, data: bytes):
+        run_async(self.awrite(data))
 
     async def drain(self):
         await self.mux._drain()
 
-    async def close(self):
+    async def aclose(self):
         await self.stream.close()
+        self.stream.closed = True
+    def close(self):
+        if not self.closed:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    self._close_task = asyncio.create_task(self.aclose())
+                else:
+                    loop.run_until_complete(self.aclose())
+            except RuntimeError:
+                # если цикла нет — создаём временный
+                asyncio.run(self.aclose())
+
+    async def wait_closed(self):
+        if self._close_task is not None:
+            await self._close_task
+        elif not self.closed:
+            await self.stream.wait_closed() if hasattr(self.stream, "wait_closed") else None
 
 class MuxStreamReader:
     def __init__(self, stream: 'MuxStream', mux: 'MuxSession', max_queue=500):
@@ -63,16 +99,32 @@ class MuxStreamReader:
         return b''.join(chunks)
 
     async def read(self, n: int = -1) -> bytes:
-        if n < 0:
-            chunks = []
-            while True:
-                piece = await self.queue.get()
-                if piece is None:
-                    break
-                chunks.append(piece)
+        bytes_received = len(self._buffer)
+        chunks = [self._buffer]
+        piece = None
 
-            return b''.join(chunks) if chunks else b''
-        return await self.readexactly(n)
+        while (n < 0) or (bytes_received < n):
+            try:
+                if bytes_received == 0:
+                    piece = await self.queue.get()
+                else:
+                    piece = self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                piece = None
+
+            if piece is None:
+                break
+
+            bytes_received += len(piece)
+            chunks.append(piece)
+
+        result_bytes = b''.join(chunks)
+        if n > 0 and result_bytes:
+            self._buffer = result_bytes[n:]
+            return result_bytes[:n]
+
+        self._buffer = b''
+        return result_bytes
 
     def at_eof(self):
         return self.eof and self.queue.empty()
@@ -99,9 +151,9 @@ class MuxStream:
             try:
                 if encrypt:
                     for cryptoframe in self.cipher.encrypt(data):
-                        await self.writer.write(cryptoframe)
+                        self.writer.write(cryptoframe)
                 else:
-                    await self.writer.write(data)
+                    self.writer.write(data)
                 self.bytes_sent += len(data)
 
                 await self.writer.drain()
@@ -144,7 +196,8 @@ class TCP_MuxSession:
 
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, cipher: Cipher, host: str, port: int,
                  mux_name: str = 'Mux', log_bytes: bool = False, create_new_streams_in_read_loop: bool = False,
-                 handle_stream: Optional[Callable[[MuxStream], None]] = None, user: Optional['User'] = None):
+                 handle_stream: Optional[Callable[[MuxStream], None]] = None, user: Optional['User'] = None,
+                 start_reader: bool = True):
 
         self.mux_name = mux_name
         self.reader = reader
@@ -161,7 +214,7 @@ class TCP_MuxSession:
         self.streams: Dict[int, MuxStream] = {}
         self.closed = False
         self._id_iter = itertools.count(1)  # stream_id
-        self._reader_task = asyncio.create_task(self._read_loop())
+        self._reader_task = asyncio.create_task(self.read_loop()) if start_reader else None
         self._writer_lock = asyncio.Lock()
 
     async def open_stream(self, stream_id: int = -1) -> MuxStream:
@@ -185,7 +238,7 @@ class TCP_MuxSession:
     async def _drain(self):
         await self.writer.drain()
 
-    async def _read_loop(self):
+    async def read_loop(self):
         try:
             while not self.closed:
                 header = await self.reader.readexactly(self.HEADER_STRUCT.size)
@@ -213,11 +266,12 @@ class TCP_MuxSession:
         if self.closed:
             return
         self.closed = True
-        self._reader_task.cancel()
-        try:
-            await self._reader_task
-        except asyncio.CancelledError:
-            pass
+        if self._reader_task:
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                pass
         for stream in list(self.streams.values()):
             await stream.reader._feed_data(None)
         self.streams.clear()
