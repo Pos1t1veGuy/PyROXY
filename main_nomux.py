@@ -9,7 +9,6 @@ from pyroxy.proxy_server import Socks5Server
 from pyroxy.ciphers import *
 from pyroxy.db_handlers import SQLite_Handler
 from pyroxy.wrappers import HTTP_WS_Wrapper
-from pyroxy.mux import Mux_Socks5Server
 
 
 parser = argparse.ArgumentParser(description="PyROXY server starter")
@@ -56,7 +55,7 @@ available_ciphers = [
     ChaCha20_Poly1305(key=key),
     Cipher()
 ]
-SERVER = Mux_Socks5Server(
+SERVER = Socks5Server(
     db_handler=SQLite_Handler(filepath=db_file),
     ciphers=available_ciphers,
     udp_cipher=available_ciphers[2].copy(),

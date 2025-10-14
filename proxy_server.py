@@ -373,6 +373,10 @@ class User:
     async def ban(self):
         await self.server.ban_user(self)
 
+    @staticmethod
+    def get_empty_user(**kwargs) -> 'User':
+        return User(Socks5Server(), '0.0.0.0', 0, ..., id=-1, **kwargs)
+
     def __str__(self):
         address = f'"{self.ip}:{self.port}"'
         return f'{self.__class__.__name__}("{self.username}", id={self.id}, handshaked={self.handshaked}, address={address})'

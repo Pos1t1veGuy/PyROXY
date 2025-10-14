@@ -1,4 +1,5 @@
 from typing import *
+import time
 import asyncio
 import struct
 import itertools
@@ -197,8 +198,10 @@ class TCP_MuxSession:
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, cipher: Cipher, host: str, port: int,
                  mux_name: str = 'Mux', log_bytes: bool = False, create_new_streams_in_read_loop: bool = False,
                  handle_stream: Optional[Callable[[MuxStream], None]] = None, user: Optional['User'] = None,
-                 start_reader: bool = True):
+                 start_reader: bool = True, always_alive: bool = False):
 
+        self.create_time = time.time()
+        self.last_activity_time = time.time()
         self.mux_name = mux_name
         self.reader = reader
         self.writer = writer
@@ -208,6 +211,7 @@ class TCP_MuxSession:
         self.port = port
 
         self.log_bytes = log_bytes
+        self.always_alive = always_alive
         self.user = user
         self.create_new_streams_in_read_loop = create_new_streams_in_read_loop
         self.handle_stream = handle_stream
@@ -218,6 +222,7 @@ class TCP_MuxSession:
         self._writer_lock = asyncio.Lock()
 
     async def open_stream(self, stream_id: int = -1) -> MuxStream:
+        self.last_activity_time = time.time()
         if stream_id == -1 or stream_id in self.streams.keys():
             stream_id = next(self._id_iter)
         stream = MuxStream(self, stream_id, self.cipher.copy())
@@ -225,10 +230,12 @@ class TCP_MuxSession:
         return stream
 
     async def close_stream(self, stream_id: int):
+        self.last_activity_time = time.time()
         await self.streams[stream_id].close()
         self.streams.pop(stream_id)
 
     async def _send_frame(self, stream_id: int, flags: int, payload: bytes):
+        self.last_activity_time = time.time()
         try:
             async with self._writer_lock:
                 self.writer.write(self.HEADER_STRUCT.pack(stream_id, flags, len(payload)) + payload)
@@ -236,12 +243,14 @@ class TCP_MuxSession:
             self.logger.warning(f"_send_frame failed: {e} (stream {stream_id})")
 
     async def _drain(self):
+        self.last_activity_time = time.time()
         await self.writer.drain()
 
     async def read_loop(self):
         try:
             while not self.closed:
                 header = await self.reader.readexactly(self.HEADER_STRUCT.size)
+                self.last_activity_time = time.time()
                 stream_id, flags, length = self.HEADER_STRUCT.unpack(header)
                 payload = await self.reader.readexactly(length) if length > 0 else b""
 
@@ -263,6 +272,7 @@ class TCP_MuxSession:
             await self.close()
 
     async def close(self):
+        self.last_activity_time = time.time()
         if self.closed:
             return
         self.closed = True

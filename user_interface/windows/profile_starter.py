@@ -129,4 +129,7 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         pass
     except Exception as ex:
-        input(f'[e] {ex}')
+        try:
+            input(f'[e] {ex}')
+        except KeyboardInterrupt:
+            pass

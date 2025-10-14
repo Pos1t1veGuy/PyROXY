@@ -8,6 +8,7 @@ from ..proxy_server import Socks5Server
 from ..ciphers import *
 from ..db_handlers import SQLite_Handler
 from ..wrappers import HTTP_WS_Wrapper
+from ..mux import Mux_Socks5Server
 
 
 db_file = Path(__file__).parent.parent / "telegram_bot" / "db.sqlite3"
@@ -39,7 +40,7 @@ available_ciphers = [
     AES_CTR(key=key, iv=os.urandom(16)),
     ChaCha20_Poly1305(key=key),
 ]
-SERVER = Socks5Server(
+SERVER = Mux_Socks5Server(
     db_handler=SQLite_Handler(filepath=db_file),
     ciphers=available_ciphers,
     udp_cipher=available_ciphers[2],
