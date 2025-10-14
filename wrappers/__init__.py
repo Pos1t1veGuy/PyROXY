@@ -3,6 +3,8 @@ import asyncio
 import base64
 import hashlib
 import os
+import traceback
+import logging
 from pathlib import Path
 from fake_useragent import UserAgent
 
@@ -127,7 +129,8 @@ Connection: close
                 setattr(self, attr_name, attr)
                 self.errors[num] = attr
 
-    async def http_client_hello(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
+    async def http_client_hello(self, client: 'Socks5Client', reader: asyncio.StreamReader,
+                                writer: asyncio.StreamWriter) -> bool:
         http_get = (
             f"GET {self.http_path} HTTP/1.1\r\n"
             f"Host: {self.host}\r\n"
@@ -150,59 +153,60 @@ Connection: close
 
         return b'200 OK' in response
 
-    async def http_server_hello(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
+    async def http_server_hello(self, server: 'Socks5Server', reader: asyncio.StreamReader,
+                                writer: asyncio.StreamWriter) -> bool:
         try:
             try:
                 request = await reader.readuntil(b"\r\n\r\n")
             except asyncio.IncompleteReadError:
-                return await self.http_error(writer, 400)
+                return await self.http_error(400, writer)
 
             request_str = request.decode(errors='ignore')
             method, path, version = request_str.split()[:3]
+            response_format = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/html; charset=utf-8\r\n"
+                "Content-Length: {}\r\n"
+                "Connection: close\r\n"
+                "\r\n"
+            )
 
-            if method != "GET":
-                return await self.http_error(writer, 405)
             if not 'Host:' in request_str:
                 await asyncio.sleep(self.timeout)
-                return await self.http_error(writer, 408)
+                return await self.http_error(408, writer)
 
-            if path == '/' + self.icon_path.name:
-                await self.handle_favicon(reader, writer)
-            elif path == self.http_path:
-                res = self.http_response
-                response = (
-                    "HTTP/1.1 200 OK\r\n"
-                    "Content-Type: text/html; charset=utf-8\r\n"
-                    f"Content-Length: {len(res.encode())}\r\n"
-                    "Connection: close\r\n"
-                    "\r\n"
-                    f"{res}"
-                )
+            if method.upper() == 'GET':
+                if path == '/' + self.icon_path.name:
+                    icon_data = self.favicon_response
+                    return await self.http_response(
+                        response_format.format(str(len(icon_data))).encode() + icon_data, writer
+                    )
+                elif path == self.http_path:
+                    content = self.index_html_response
+                    return await self.http_response(response_format.format(str(len(content))).encode() + content, writer)
+                else:
+                    return await self.http_error(404, writer)
 
-                writer.write(response.encode())
-                await writer.drain()
+            elif method.upper() == 'HEAD':
+                if path == '/' + self.icon_path.name:
+                    return await self.http_response(
+                        response_format.format(str(len(self.favicon_response))).encode(), writer
+                    )
+                elif path == self.http_path:
+                    return await self.http_response(
+                        response_format.format(str(len(self.index_html_response))).encode(), writer
+                    )
+                else:
+                    return await self.http_error(404, writer)
 
-                return True
             else:
-                return await self.http_error(writer, 404)
+                return await self.http_error(405, writer)
 
         except Exception as ex:
+            if server.logger.isEnabledFor(logging.DEBUG):
+                traceback.print_exc()
             server.logger.error(f'Server hello error: {ex}')
-            return await self.http_error(writer, 500)
-
-    async def handle_favicon(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        with open(self.icon_path, 'rb') as f:
-            icon_data = f.read()
-
-        response = (
-                b'HTTP/1.1 200 OK\r\n'
-                b'Content-Type: image/png\r\n'
-                b'Content-Length: ' + str(len(icon_data)).encode() + b'\r\n'
-                b'Connection: close\r\n'
-                b'\r\n' + icon_data
-        )
-        writer.write(response)
-        await writer.drain()
+            return await self.http_error(500, writer)
 
     async def ws_client_hello(self, client: 'Socks5Client', reader: asyncio.StreamReader,
                               writer: asyncio.StreamWriter) -> bool:
@@ -229,64 +233,70 @@ Connection: close
                 request = await reader.readuntil(b"\r\n\r\n")
             except asyncio.exceptions.IncompleteReadError:
                 await asyncio.sleep(self.timeout)
-                return await self.http_error(writer, 408)
+                return await self.http_error(408, writer)
 
             request_str = request.decode(errors='ignore')
             method, path, version = request_str.split()[:3]
+            key_line = [line for line in request.decode().split("\r\n") if line.lower().startswith("sec-websocket-key")]
 
             if "upgrade: websocket" not in request_str.lower():
-                return await self.http_error(writer, 404)
-            if method != "GET":
-                return await self.http_error(writer, 405)
-            if path != self.ws_path:
-                return await self.http_error(writer, 404)
-            if not 'Host:' in request_str:
+                return await self.http_error(404, writer)
+            elif method != "GET":
+                return await self.http_error(405, writer)
+            elif path != self.ws_path:
+                return await self.http_error(404, writer)
+            elif not 'Host:' in request_str:
                 await asyncio.sleep(self.timeout)
-                return await self.http_error(writer, 408)
+                return await self.http_error(408, writer)
+            elif not key_line:
+                return await self.http_error(404, writer)
 
-            key_line = [line for line in request.decode().split("\r\n") if line.lower().startswith("sec-websocket-key")]
-            if not key_line:
-                return await self.http_error(writer, 404)
             client_key = key_line[0].split(":")[1].strip()
             accept = base64.b64encode(hashlib.sha1((client_key + self.GUID).encode()).digest()).decode()
-
-            response = (
+            return await self.http_response((
                 "HTTP/1.1 101 Switching Protocols\r\n"
                 "Upgrade: websocket\r\n"
                 "Connection: Upgrade\r\n"
                 f"Sec-WebSocket-Accept: {accept}\r\n"
                 "\r\n"
-            )
-            writer.write(response.encode())
-            await writer.drain()
-            return True
+            ).encode(), writer)
+
         except Exception as ex:
+            if server.logger.isEnabledFor(logging.DEBUG):
+                traceback.print_exc()
             server.logger.error(f'Server hello error: {ex}')
-            return await self.http_error(writer, 500)
+            return await self.http_error(500, writer)
 
     async def client_hello(self, client: 'Socks5Client', reader: asyncio.StreamReader,
                            writer: asyncio.StreamWriter) -> bool:
-        http = await self.http_client_hello(reader, writer)
+        http = await self.http_client_hello(client, reader, writer)
         ws = await self.ws_client_hello(client, reader, writer)
         return http and ws
 
     async def server_hello(self, server: 'Socks5Server', reader: asyncio.StreamReader,
                            writer: asyncio.StreamWriter) -> bool:
-        http = await self.http_server_hello(reader, writer)
+        http = await self.http_server_hello(server, reader, writer)
         ws = await self.ws_server_hello(server, reader, writer)
         return http and ws
 
-    async def http_error(self, writer, num: int) -> bool:
+    @property
+    def index_html_response(self) -> bytes:
+        with open(self.http_file_path, 'r', encoding='utf-8') as f:
+            return f.read().strip().encode()
+    @property
+    def favicon_response(self) -> bytes:
+        with open(self.icon_path, 'rb') as f:
+            return f.read()
+
+    async def http_error(self, num: int, writer: asyncio.StreamWriter) -> bool:
         try:
             writer.write(self.errors[num])
             await writer.drain()
-            writer.close()
             return False
         except ConnectionResetError:
             pass
 
-
-    @property
-    def http_response(self) -> str:
-        with open(self.http_file_path, 'r', encoding='utf-8') as f:
-            return f.read().strip()
+    async def http_response(self, content: bytes, writer: asyncio.StreamWriter) -> bool:
+        writer.write(content)
+        await writer.drain()
+        return True
