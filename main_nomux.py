@@ -8,7 +8,7 @@ from logging.handlers import TimedRotatingFileHandler
 from pyroxy.proxy_server import Socks5Server
 from pyroxy.ciphers import *
 from pyroxy.db_handlers import SQLite_Handler
-from pyroxy.wrappers import HTTP_WS_Wrapper
+from pyroxy.wrappers import HTTP_WS_Wrapper, PP_HTTP_WS_Wrapper
 
 
 parser = argparse.ArgumentParser(description="PyROXY server starter")
@@ -50,7 +50,7 @@ file_handler.setFormatter(formatter)
 key = bytes.fromhex(open(key_file, 'r').read())
 
 available_ciphers = [
-    Cipher(wrapper=HTTP_WS_Wrapper()), # starts a handshake with client_hello and server_hello from wrapper
+    Cipher(wrapper=PP_HTTP_WS_Wrapper()), # starts a handshake with client_hello and server_hello from wrapper
     AES_CTR(key=key, iv=os.urandom(16)),
     ChaCha20_Poly1305(key=key),
     Cipher()

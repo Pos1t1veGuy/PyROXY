@@ -5,6 +5,7 @@ import platform
 import subprocess
 import zipfile
 import requests as rq
+import time
 from pathlib import Path
 
 
@@ -25,8 +26,20 @@ def is_admin() -> bool:
         return os.geteuid() == 0
 
 
+def rq_get_with_retry(url: str, retries: int = 3, delay: int = 2) -> rq.Response:
+    for attempt in range(retries):
+        try:
+            resp = rq.get(url, timeout=(10, 15))
+            resp.raise_for_status()
+            return resp
+        except rq.exceptions.RequestException as e:
+            print(f"[!] Attempt {attempt + 1}/{retries} failed: {e}")
+            if attempt < retries - 1:
+                time.sleep(delay)
+    raise ConnectionError(f"Failed to fetch {url} after {retries} attempts")
+
 def get_windows_zip_version(repo_url: str) -> Tuple[str, str]:
-    resp = rq.get(f'{repo_url}/releases')
+    resp = rq_get_with_retry(f'{repo_url}/releases')
     resp.raise_for_status()
     releases_json = resp.json()
 

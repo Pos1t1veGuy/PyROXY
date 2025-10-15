@@ -47,7 +47,8 @@
     <div id="fun-message"></div>
 
     <script>
-        const sock = new WebSocket("ws://" + window.location.host + "/ws");
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const sock = new WebSocket(`${protocol}//${window.location.host}/ws`);
         sock.onopen = () => {
             sock.send("123");
         };

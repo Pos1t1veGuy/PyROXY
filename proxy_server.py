@@ -156,7 +156,7 @@ class Socks5Server:
         default_cipher = self.ciphers[0].copy()
 
         try:
-            if await self.trace_event(default_cipher.server_hello(self, reader, writer), event_name=f'SERVER_HELLO'):
+            if await self.trace_event(default_cipher.server_hello(self, user, reader, writer), event_name=f'SERVER_HELLO'):
                 self.logger.debug(f"Sent server_hello of {default_cipher.wrapper.__class__.__name__}")
                 try:
                     cipher, proxying_mode = await self.trace_event(
@@ -167,12 +167,14 @@ class Socks5Server:
                     user, cipher = await self.handshake(reader, writer, cipher, default_cipher, user=user)
                 except ConnectionError as e:
                     self.logger.error(f'Suspicious client tried to connect: {user} => {e}')
+                    await default_cipher.handle_suspicious_client(self, user, reader, writer)
                     return
 
                 self.logger.info(f"{user} is connected with cipher {cipher.__class__.__name__}")
                 result_code = await self.proxy_client(user, cipher, proxying_mode, reader, writer)
                 self.logger.info(f'Сompleted the operation successfully, code: {result_code}')
             else:
+                await default_cipher.handle_suspicious_client(self, user, reader, writer)
                 self.logger.warning(f'Suspicious client tried to connect: {user}')
 
         except Exception as e:
@@ -543,8 +545,9 @@ class ConnectionMethods:
         )
         client_writer.write(b''.join(reply_frames))
         await client_writer.drain()
+        await asyncio.sleep(2)
 
-        server.logger.debug(f"Sent PONG to {user}")
+        server.logger.debug(f"Sent PONG to {user} ({len(reply_frames)} bytes)")
         return 0, [0,0]
 
     @staticmethod
