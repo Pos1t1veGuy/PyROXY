@@ -10,17 +10,15 @@ sudo systemctl stop nginx
 sudo certbot certonly --standalone -d "$DOMAIN" --non-interactive --agree-tos -m "$EMAIL"
 
 echo "[*] making nginx.conf..."
-sudo chmod o+rx /root
-sudo chmod -R o+r /root/pyroxy/wrappers
 cat << EOF | sudo tee /etc/nginx/https_stream.conf > /dev/null
 server {
     listen 443 ssl;
+    proxy_protocol on;
     proxy_pass proxy_backend;
 
     ssl_certificate     /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
 }
-
 EOF
 cat << 'EOF' | sudo tee /etc/nginx/nginx.conf > /dev/null
 load_module /usr/lib/nginx/modules/ngx_stream_module.so;

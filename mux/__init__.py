@@ -28,7 +28,7 @@ class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
             if self.server_is_available:
                 for i in range(self.min_mux_workers):
                     self.mux_sessions.append(
-                        await self.open_mux_connection(always_alive=True, mux_name=f'MuxSession{i}')[1]
+                        (await self.open_mux_connection(always_alive=True, mux_name=f'MuxSession{i}'))[1]
                     )
 
                 asyncio.create_task(self.monitor_mux())
@@ -61,13 +61,13 @@ class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
                     if session.closed:
                         if session.always_alive:
                             self.logger.debug(f"Reconnecting MUX {i}...")
-                            self.mux_sessions[i] = await self.open_mux_connection(mux_name=f'MuxSession{i}')[1]
+                            self.mux_sessions[i] = (await self.open_mux_connection(mux_name=f'MuxSession{i}'))[1]
                         else:
                             self.mux_sessions.pop(i)
                     elif self.session_timeout <= now - session.last_activity_time:
                         if session.always_alive:
                             self.logger.debug(f"Reconnecting MUX {i}...")
-                            self.mux_sessions[i] = await self.open_mux_connection(mux_name=f'MuxSession{i}')[1]
+                            self.mux_sessions[i] = (await self.open_mux_connection(mux_name=f'MuxSession{i}'))[1]
                         else:
                             await session.close()
 

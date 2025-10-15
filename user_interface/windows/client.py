@@ -5,6 +5,7 @@ import threading
 import ctypes, sys
 import signal
 import subprocess
+import ipaddress
 import traceback
 from pathlib import Path
 from logging.handlers import TimedRotatingFileHandler
@@ -12,6 +13,7 @@ from logging.handlers import TimedRotatingFileHandler
 from pyroxy.proxy_client import Socks5_TCP_Retranslator
 from pyroxy.mux import Socks5_TCP_Mux_Retranslator
 from pyroxy.ciphers import *
+from pyroxy.base_cipher import resolve_doh
 from pyroxy.wrappers import HTTP_WS_Wrapper
 from pyroxy.tunnel import Tun2Socks
 
@@ -95,7 +97,19 @@ def main():
     else:
         open(args.white_list_file, 'w').write('# Put a domains or an IPs here')
 
-    tunnel = Tun2Socks(args.host, white_list=white_list, path_to_exe=args.tun2socks_path,
+    remote_domain = ''
+    try:
+        ipa = ipaddress.ip_address(args.host)
+        remote_host = args.host
+    except ValueError:
+        try:
+            remote_host = asyncio.run(resolve_doh(args.host))[0]
+            remote_domain = args.host
+        except (RuntimeError, IndexError):
+            print(f'[e] Can not resolve name {args.host}')
+            sys.exit(1)
+
+    tunnel = Tun2Socks(remote_host, white_list=white_list, path_to_exe=args.tun2socks_path,
                        silent=not bool(args.tunnel_debug))
     if args.auto_forward_traffic == 1:
         tunnel.stop() # to delete broken routes
@@ -122,7 +136,9 @@ def main():
     key = bytes.fromhex(args.key)
     default_key = bytes.fromhex(args.default_key)
     available_ciphers = [
-        Cipher(wrapper=HTTP_WS_Wrapper()),  # starts a handshake with client_hello and server_hello from wrapper
+        Cipher(
+            wrapper=HTTP_WS_Wrapper(host=remote_domain, server_ip=remote_host)
+        ), # starts a handshake with client_hello and server_hello from wrapper
         AES_CTR(key=default_key, iv=os.urandom(16)),
         ChaCha20_Poly1305(key=default_key),
         Cipher(), # without wrapper
@@ -130,7 +146,8 @@ def main():
 
     try:
         CLIENT = Socks5_TCP_Mux_Retranslator(
-            args.host, int(args.port),
+            remote_host, int(args.port),
+            remote_domain=remote_domain,
             cipher_index=ciphers_choices.index(args.cipher),
             ciphers=available_ciphers,
             udp_cipher=available_ciphers[ciphers_choices.index(args.udp_cipher)].copy(),
@@ -153,6 +170,7 @@ def main():
         print(f'[e] {ex}')
     finally:
         print('[+] client closed')
+        tunnel.stop()
 
     return tunnel
 

@@ -8,11 +8,11 @@ sudo apt-get install libnginx-mod-stream
 
 echo "[*] making nginx.conf..."
 cat << 'EOF' | sudo tee /etc/nginx/default_stream.conf > /dev/null
-
 limit_conn_zone $binary_remote_addr zone=addr:10m;
 
 server {
     listen 80;
+    proxy_protocol on;
 
     # Ограничения
     proxy_connect_timeout 5s;

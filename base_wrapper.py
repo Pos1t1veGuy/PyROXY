@@ -19,9 +19,13 @@ class Wrapper:
                            writer: asyncio.StreamWriter) -> bool:
         return True
 
-    async def server_hello(self, server: 'Socks5Server', reader: asyncio.StreamReader,
+    async def server_hello(self, server: 'Socks5Server', user: 'User', reader: asyncio.StreamReader,
                            writer: asyncio.StreamWriter) -> bool:
         return True
+
+    async def handle_suspicious_client(self, server: 'Socks5Server', user: 'User', reader: asyncio.StreamReader,
+                           writer: asyncio.StreamWriter):
+        ...
 
     def wrap(self, data: bytes) -> bytes:
         return data

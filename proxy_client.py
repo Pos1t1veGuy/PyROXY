@@ -8,7 +8,7 @@ import struct
 import time
 
 from .logger_setup import *
-from .base_cipher import Cipher, REPLYES_CODES, get_address
+from .base_cipher import Cipher, REPLYES_CODES, get_address, resolve_doh
 from .proxy_server import Socks5Server, ConnectionMethods, UDPServerProxy
 
 
@@ -546,9 +546,12 @@ class Socks5_UDP_Retranslator(UDP_ProxySession):
         self.stop = True
 
 class Socks5_TCP_Retranslator(Socks5Client):
-    def __init__(self, remote_host: str, remote_port: int, *args, username: str = '', password: str = '', **kwargs):
+    def __init__(self, remote_host: str, remote_port: int, *args, remote_domain: str = '',
+                 username: str = '', password: str = '', resolver_urls: Optional[list[str]] = None, **kwargs):
         super().__init__(*args, **kwargs)
+
         self.remote_host = remote_host
+        self.remote_domain = remote_domain
         self.remote_port = remote_port
         self.username = username
         self.password = password
@@ -657,9 +660,6 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
     async def PING(self, user: 'User', addr: str, port: int, default_cipher: Cipher, remote_session: TCP_ProxySession,
                       client_writer: asyncio.StreamWriter, client_reader: asyncio.StreamReader) -> int:
-        if not (await self.is_valid_connect_addr(user, addr, port)):
-            return 1
-
         cmd_bytes = await remote_session.cipher.client_command(
             self.socks_version, self.user_commands['ping'], addr, port
         )
@@ -676,7 +676,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
     async def CONNECT(self, user: 'User', addr: str, port: int, default_cipher: Cipher, remote_session: TCP_ProxySession,
                       client_writer: asyncio.StreamWriter, client_reader: asyncio.StreamReader) -> int:
-        if not (await self.is_valid_connect_addr(user, addr, port)):
+        if not (await self.is_valid_connect_addr(default_cipher, user, client_writer, addr, port)):
             return 1
 
         self.logger.debug(f"Sending a selected command to server...")
@@ -691,7 +691,6 @@ class Socks5_TCP_Retranslator(Socks5Client):
         except ConnectionError as e:
             self.logger.error(e)
             return 1
-
 
         try:
             local_ip, local_port = remote_session.get_sockname()
@@ -797,7 +796,8 @@ class Socks5_TCP_Retranslator(Socks5Client):
         return 1
 
 
-    async def is_valid_connect_addr(self, user: 'User', addr: str, port: int) -> bool:
+    async def is_valid_connect_addr(self, default_cipher: Cipher, user: 'User', client_writer: asyncio.StreamWriter,
+                                    addr: str, port: int) -> bool:
         if (addr == '0.0.0.0' and port == 0) or (addr.startswith('192.168') or addr.startswith('10.') or
                                                  addr.startswith('127.')) or addr == self.remote_host:
             self.logger.debug(
@@ -807,16 +807,21 @@ class Socks5_TCP_Retranslator(Socks5Client):
             try:
                 reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'],
                                                                '0.0.0.0', 0)
-                for r in reply:
-                    client_writer.write(r)
-                await client_writer.drain()
-            except Exception as e:
-                try:
-                    client_writer.write(
-                        await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'],
-                                                               '0.0.0.0', 0)
-                    )
+                if client_writer:
+                    for r in reply:
+                        client_writer.write(r)
                     await client_writer.drain()
+            except Exception as e:
+                if self.logger.isEnabledFor(logging.DEBUG):
+                    traceback.print_exc()
+                self.logger.error(f'Connection error: {e}')
+                try:
+                    if client_writer:
+                        client_writer.write(
+                            await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'],
+                                                                   '0.0.0.0', 0)
+                        )
+                        await client_writer.drain()
                 except:
                     pass
             return False

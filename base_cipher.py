@@ -166,6 +166,7 @@ class Cipher:
         self.wrapper = wrapper
         self.client_hello = self.wrapper.client_hello
         self.server_hello = self.wrapper.server_hello
+        self.handle_suspicious_client = self.wrapper.handle_suspicious_client
         self.is_client = False
         self.is_server = False
         self.is_handshaked = False
