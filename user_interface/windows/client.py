@@ -19,7 +19,7 @@ from pyroxy.tunnel import Tun2Socks
 from pyroxy.base_cipher import resolve_domain
 
 
-APP_VERSION = '1.0.2'
+APP_VERSION = '1.0.3'
 
 
 def make_log(filename: str):
