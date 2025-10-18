@@ -21,6 +21,9 @@ class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
         self.session_timeout = session_timeout
         self.stream_timeout = stream_timeout
         self.mux_sessions: List[TCP_MuxSession] = []
+        self._session_lock = asyncio.Lock()
+        self._mux_lock = asyncio.Lock()
+        self.closing = False
 
     async def async_listen_and_forward(self, local_host: str = '127.0.0.1', local_port: int = 1080):
         try:
@@ -43,33 +46,35 @@ class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
 
 
     async def monitor_mux(self):
-        while True:
+        while not self.closing:
             try:
                 ping_count = 0
                 while (await self.ping()) <= 0:
                     if ping_count == 4:
                         self.logger.error('Server is unavailable')
-                        for session in self.mux_sessions:
-                            await session.close()
+                        async with self._mux_lock:
+                            for session in self.mux_sessions:
+                                await session.close()
 
                     ping_count += 1
                     await asyncio.sleep(self.mux_monitor_delay)
                     continue
 
-                now = time.time()
-                for i, session in enumerate(list(self.mux_sessions)):
-                    if session.closed:
-                        if session.always_alive:
-                            self.logger.debug(f"Reconnecting MUX {i}...")
-                            self.mux_sessions[i] = (await self.open_mux_connection(mux_name=f'MuxSession{i}'))[1]
-                        else:
-                            self.mux_sessions.pop(i)
-                    elif self.session_timeout <= now - session.last_activity_time:
-                        if session.always_alive:
-                            self.logger.debug(f"Reconnecting MUX {i}...")
-                            self.mux_sessions[i] = (await self.open_mux_connection(mux_name=f'MuxSession{i}'))[1]
-                        else:
-                            await session.close()
+                async with self._mux_lock:
+                    now = time.time()
+                    for i, session in enumerate(list(self.mux_sessions)):
+                        if session.closed:
+                            if session.always_alive:
+                                self.logger.debug(f"Reconnecting MUX {i}...")
+                                self.mux_sessions[i] = (await self.open_mux_connection(mux_name=f'MuxSession{i}'))[1]
+                            else:
+                                self.mux_sessions.pop(i)
+                        elif self.session_timeout <= now - session.last_activity_time:
+                            if session.always_alive:
+                                self.logger.debug(f"Reconnecting MUX {i}...")
+                                self.mux_sessions[i] = (await self.open_mux_connection(mux_name=f'MuxSession{i}'))[1]
+                            else:
+                                await session.close()
 
                 await asyncio.sleep(self.mux_monitor_delay)
             except Exception as ex:
@@ -87,16 +92,17 @@ class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
             )
             return
 
-        try:
-            mux = await self.get_strongest_session()
-            remote_stream = await mux.open_stream()
-            self.logger.debug(f'MUX Stream is opened in {mux}')
-        except ConnectionRefusedError:
-            self.logger.error(f"Can not connect to remote proxy {self.remote_host}:{self.remote_port}")
-            return
-        except Exception as e:
-            self.logger.error(f"Can not do handshake to remote proxy {self.remote_host}:{self.remote_port} — {e}")
-            return
+        async with self._mux_lock:
+            try:
+                mux = await self.get_strongest_session()
+                remote_stream = await mux.open_stream()
+                self.logger.debug(f'MUX Stream is opened in {mux}')
+            except ConnectionRefusedError:
+                self.logger.error(f"Can not connect to remote proxy {self.remote_host}:{self.remote_port}")
+                return
+            except Exception as e:
+                self.logger.error(f"Can not do handshake to remote proxy {self.remote_host}:{self.remote_port} — {e}")
+                return
 
         try:
             status_code = await command(user, addr, port, default_cipher, remote_stream, client_writer, client_reader)
@@ -109,18 +115,20 @@ class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
             return
 
     async def open_mux_connection(self, **kwargs) -> Tuple[TCP_ProxySession, TCP_MuxSession]:
-        tcp_session = await self.handshake(
-            proxy_host=self.remote_host, proxy_port=self.remote_port, username=self.username, password=self.password,
-            proxying_mode=1,
-        )
-        mux_session = TCP_MuxSession(
-            tcp_session.reader, tcp_session.writer, tcp_session.cipher, self.remote_host, self.remote_port, **kwargs
-        )
-        return tcp_session, mux_session
+        async with self._session_lock:
+            tcp_session = await self.handshake(
+                proxy_host=self.remote_host, proxy_port=self.remote_port, username=self.username, password=self.password,
+                proxying_mode=1,
+            )
+            mux_session = TCP_MuxSession(
+                tcp_session.reader, tcp_session.writer, tcp_session.cipher, self.remote_host, self.remote_port, **kwargs
+            )
+            return tcp_session, mux_session
 
     async def ping(self, timeout: int = 5) -> float:
-        mux = await self.get_strongest_session()
-        remote_stream = await mux.open_stream()
+        async with self._mux_lock:
+            mux = await self.get_strongest_session()
+            remote_stream = await mux.open_stream()
         user = User.get_empty_user(cipher=Cipher())
         time_start = time.time()
 
@@ -140,15 +148,20 @@ class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
             if create_new:
                 _, mux = await self.open_mux_connection(mux_name=f'MuxSession{len(self.mux_sessions)}_temp')
                 self.mux_sessions.append(mux)
+                return mux
             else:
                 return
 
-        mux = min(self.mux_sessions, key=lambda s: len(s.streams))
-        if len(mux.streams) >= self.max_streams_in_session and len(self.mux_sessions) < self.max_mux_workers and create_new:
+        mux = min(self.active_mux_sessions, key=lambda s: len(s.streams))
+        if len(mux.streams) >= self.max_streams_in_session and len(self.active_mux_sessions) < self.max_mux_workers and create_new:
             _, mux = await self.open_mux_connection(mux_name=f'MuxSession{len(self.mux_sessions)}_temp')
             self.mux_sessions.append(mux)
 
         return mux
+
+    @property
+    def active_mux_sessions(self) -> TCP_MuxSession:
+        return [mux for mux in self.mux_sessions if not mux.closed]
 
 class Mux_Socks5Server(Socks5Server):
     def __init__(self, *args, **kwargs):
@@ -228,7 +241,7 @@ class Mux_Socks5Server(Socks5Server):
 
     async def handle_stream(self, stream: MuxStream):
         try:
-            self.logger.info(f"[MUX] Session created at {stream.mux.mux_name} ({stream.mux.address_str})")
+            self.logger.info(f"[MUX] Stream created at {stream.mux.mux_name} ({stream.mux.address_str})")
             addr, port, command = await self.trace_event(
                 stream.cipher.server_handle_command(self.socks_version, self.user_commands, stream.reader),
                 event_name=f'HANDLE_CLIENT_CMD'
@@ -260,7 +273,7 @@ class Mux_Socks5Server(Socks5Server):
                     self.clients_udp_servers.pop(stream.mux.user.username)
                 else:
                     self.clients_udp_servers[stream.mux.user.username] -= 1
-        except asyncio.IncompleteReadError:
+        except (asyncio.IncompleteReadError, ConnectionResetError, ConnectionError):
             self.logger.info(f"[MUX] Session {stream.mux.mux_name} ({stream.mux.address_str}) closed by peer")
             await self.close()
         except Exception as e:

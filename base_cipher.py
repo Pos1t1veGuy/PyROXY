@@ -5,6 +5,7 @@ import asyncio
 import logging
 import aiohttp
 import json
+import dns.resolver
 import ipaddress as ipa
 from functools import lru_cache
 
@@ -133,32 +134,22 @@ def get_address(data: bytes, address_type: int) -> Tuple[str, int]:
             raise ConnectionError(f"Invalid address: {address_type}, it must be 0x01/0x03/0x04")
     return addr, port
 
-async def resolve_doh(domain: str, resolver_urls: Optional[list[str]] = None) -> list[str]:
-    """
-    Resolves a domain name using DNS over HTTPS (DoH).
-    Returns a list of IPv4 addresses.
-    """
-    if not resolver_urls:
-        resolver_urls = [
-            "https://1.1.1.1/dns-query?name={domain}",
-            "https://8.8.8.8/dns-query?name={domain}",
-            "https://9.9.9.9/dns-query?name={domain}"
+def resolve_domain(domain: str, retry: bool = True) -> str:
+    try:
+        resolver = dns.resolver.Resolver()
+        resolver = dns.resolver.Resolver(configure=False)
+        resolver.nameservers = [
+            "https://cloudflare-dns.com/dns-query",
+            "https://dns.google/dns-query",
+            "https://dns.adguard-dns.com/dns-query",
         ]
-
-    headers = {"accept": "application/dns-json"}
-
-    for url in resolver_urls:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url.format(domain=f"{domain}&type=A"), headers=headers, timeout=3) as resp:
-                    if resp.status != 200:
-                        continue
-                    text = await resp.text()
-                    data = json.loads(text)
-                    return [a["data"] for a in data.get("Answer", []) if a["type"] == 1]
-        except:
-            continue
-    raise RuntimeError(f"Cannot resolve {domain} via DoH resolvers")
+        resolver.timeout = 5
+        resolver.lifetime = 5
+        resolver.use_doh = True
+        answer = resolver.resolve(domain, 'A')
+        return answer[0].to_text()
+    except:
+        return resolve_domain(domain, retry=False)
 
 
 class Cipher:

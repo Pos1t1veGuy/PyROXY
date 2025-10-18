@@ -161,7 +161,7 @@ class Socks5Server:
                 try:
                     cipher, proxying_mode = await self.trace_event(
                         default_cipher.server_start_handshake(self, self.ciphers, reader, writer),
-                        event_name=f'GETTING_CIPHER'
+                        event_name=f'HANDSHAKE_START'
                     )
                     self.logger.debug(f"Client choosed a cipher {cipher.__class__.__name__}, proxying mode is {proxying_mode}")
                     user, cipher = await self.handshake(reader, writer, cipher, default_cipher, user=user)

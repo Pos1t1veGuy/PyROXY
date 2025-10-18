@@ -7,21 +7,6 @@ import itertools
 from ..base_cipher import Cipher
 
 
-def run_async(coro):
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    if loop.is_running():
-        task = asyncio.create_task(coro)
-        task.add_done_callback(lambda t: t.exception())
-    else:
-        loop.run_until_complete(coro)
-
-
-
 class MuxStreamWriter:
     def __init__(self, stream: 'MuxStream', mux: 'MuxSession'):
         self.mux = mux
@@ -33,7 +18,9 @@ class MuxStreamWriter:
             raise ConnectionError("Stream is closed")
         await self.mux._send_frame(self.stream.stream_id, 0x00, data)
     def write(self, data: bytes):
-        run_async(self.awrite(data))
+        if self.stream.closed:
+            raise ConnectionError("Stream is closed")
+        asyncio.create_task(self.awrite(data))
 
     async def drain(self):
         await self.mux._drain()
@@ -50,8 +37,8 @@ class MuxStreamWriter:
                 else:
                     loop.run_until_complete(self.aclose())
             except RuntimeError:
-                # если цикла нет — создаём временный
                 asyncio.run(self.aclose())
+            self.stream.closed = True
 
     async def wait_closed(self):
         if self._close_task is not None:
@@ -59,8 +46,11 @@ class MuxStreamWriter:
         elif not self.closed:
             await self.stream.wait_closed() if hasattr(self.stream, "wait_closed") else None
 
+    def is_closing(self) -> bool:
+        return self.mux.writer.is_closing()
+
 class MuxStreamReader:
-    def __init__(self, stream: 'MuxStream', mux: 'MuxSession', max_queue=500):
+    def __init__(self, stream: 'MuxStream', mux: 'MuxSession', max_queue=1000):
         self.mux = mux
         self.stream = stream
         self.queue = asyncio.Queue(maxsize=max_queue)
@@ -69,8 +59,9 @@ class MuxStreamReader:
 
     async def _feed_data(self, data: Optional[bytes]):
         if data is None:
-            self.eof = True
-            await self.queue.put(None)
+            if not self.eof:
+                self.eof = True
+                await self.queue.put(None)
         else:
             await self.queue.put(data)
 
@@ -111,7 +102,10 @@ class MuxStreamReader:
                 else:
                     piece = self.queue.get_nowait()
             except asyncio.QueueEmpty:
-                piece = None
+                try:
+                    piece = await asyncio.wait_for(self.queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    piece = None
 
             if piece is None:
                 break
@@ -147,7 +141,6 @@ class MuxStream:
         if isinstance(data, (list, tuple)):
             for frame in data:
                 await self.asend(frame, encrypt=encrypt, log_bytes=log_bytes)
-
         else:
             try:
                 if encrypt:
@@ -158,7 +151,8 @@ class MuxStream:
                 self.bytes_sent += len(data)
 
                 await self.writer.drain()
-            except ConnectionResetError:
+            except ConnectionResetError as ex:
+                closed = self.closed
                 await self.close()
 
     async def drain(self):
@@ -171,8 +165,7 @@ class MuxStream:
         data = await self.reader.read()
         self.bytes_received += len(data)
         if not data:
-            self.closed = True
-            await self.reader._feed_data(None)
+            await self.close()
             return b''
 
         return b''.join(self.cipher.decrypt(data))
@@ -201,7 +194,7 @@ class TCP_MuxSession:
                  start_reader: bool = True, always_alive: bool = False):
 
         self.create_time = time.time()
-        self.last_activity_time = time.time()
+        self.last_activity_time = self.create_time
         self.mux_name = mux_name
         self.reader = reader
         self.writer = writer
@@ -220,31 +213,41 @@ class TCP_MuxSession:
         self._id_iter = itertools.count(1)  # stream_id
         self._reader_task = asyncio.create_task(self.read_loop()) if start_reader else None
         self._writer_lock = asyncio.Lock()
+        self._open_lock = asyncio.Lock()
+        self._close_lock = asyncio.Lock()
 
     async def open_stream(self, stream_id: int = -1) -> MuxStream:
-        self.last_activity_time = time.time()
-        if stream_id == -1 or stream_id in self.streams.keys():
-            stream_id = next(self._id_iter)
-        stream = MuxStream(self, stream_id, self.cipher.copy())
-        self.streams[stream_id] = stream
-        return stream
+        async with self._open_lock:
+            self.last_activity_time = time.time()
+            if stream_id == -1 or stream_id in self.streams.keys():
+                stream_id = next(self._id_iter)
+            stream = MuxStream(self, stream_id, self.cipher.copy())
+            self.streams[stream_id] = stream
+            return stream
 
     async def close_stream(self, stream_id: int):
-        self.last_activity_time = time.time()
-        await self.streams[stream_id].close()
-        self.streams.pop(stream_id)
+        async with self._close_lock:
+            if stream_id in self.streams.keys():
+                self.last_activity_time = time.time()
+                await self.streams[stream_id].close()
+                self.streams.pop(stream_id)
 
-    async def _send_frame(self, stream_id: int, flags: int, payload: bytes):
-        self.last_activity_time = time.time()
+    async def _send_frame(self, stream_id: int, flags: int, payload: bytes, auto_drain: bool = True):
         try:
             async with self._writer_lock:
+                if self.writer.is_closing():
+                    return
+                self.last_activity_time = time.time()
                 self.writer.write(self.HEADER_STRUCT.pack(stream_id, flags, len(payload)) + payload)
+                if auto_drain:
+                    await self.writer.drain()
         except (ConnectionResetError, BrokenPipeError) as e:
-            self.logger.warning(f"_send_frame failed: {e} (stream {stream_id})")
+            pass
 
     async def _drain(self):
         self.last_activity_time = time.time()
-        await self.writer.drain()
+        async with self._writer_lock:
+            await self.writer.drain()
 
     async def read_loop(self):
         try:
@@ -264,32 +267,36 @@ class TCP_MuxSession:
 
                 if flags & 0x01:  # FIN
                     await stream.reader._feed_data(None)
-                    stream.closed = True
+                    await stream.close()
                     self.streams.pop(stream_id, None)
                 else:
                     await stream.reader._feed_data(payload)
-        except asyncio.IncompleteReadError:
+        except (asyncio.IncompleteReadError, ConnectionResetError) as ex:
             await self.close()
 
     async def close(self):
-        self.last_activity_time = time.time()
         if self.closed:
             return
         self.closed = True
         if self._reader_task:
             self._reader_task.cancel()
             try:
-                await self._reader_task
+                try:
+                    await asyncio.wait_for(self._reader_task, timeout=2)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
             except asyncio.CancelledError:
                 pass
         for stream in list(self.streams.values()):
             await stream.reader._feed_data(None)
         self.streams.clear()
-        try:
-            self.writer.close()
-            await self.writer.wait_closed()
-        except:
-            pass
+        async with self._writer_lock:
+            try:
+                self.writer.close()
+                await self.writer.wait_closed()
+            except:
+                pass
+        self.last_activity_time = time.time()
 
     @property
     def streams_count(self) -> int:
@@ -302,6 +309,6 @@ class TCP_MuxSession:
         return (self.host, self.port)
 
     def __str__(self):
-        return f"{self.__class__.__name__}(address={self.address} streams_count={self.streams_count}, closed={self.closed})"
+        return f"{self.__class__.__name__}(address={self.address_str} streams_count={self.streams_count}, closed={self.closed})"
     def __repr__(self):
         return f"<{self.__class__.__name__} address={self.address} streams_count={self.streams_count} closed={self.closed}>"

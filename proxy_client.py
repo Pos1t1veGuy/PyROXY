@@ -8,7 +8,7 @@ import struct
 import time
 
 from .logger_setup import *
-from .base_cipher import Cipher, REPLYES_CODES, get_address, resolve_doh
+from .base_cipher import Cipher, REPLYES_CODES, get_address
 from .proxy_server import Socks5Server, ConnectionMethods, UDPServerProxy
 
 
@@ -59,11 +59,15 @@ class Socks5Client:
             self.logger.info(
                 f"Connected to SOCKS5 proxy at {proxy_host}:{proxy_port} using {self.ciphers[self.cipher_index].__class__.__name__}"
             )
-        await default_cipher.client_hello(self, reader, writer)
+        await self.trace_event(default_cipher.client_hello(self, reader, writer), event_name='CLIENT_HELLO')
         if logging: self.logger.debug("Sent client_hello")
         if not self.default_socks5:
-            if await default_cipher.client_start_handshake(self, self.cipher_index, proxying_mode, reader, writer):
-                if logging: self.logger.debug("Sent a cipher to the server")
+            if await self.trace_event(
+                    default_cipher.client_start_handshake(self, self.cipher_index, proxying_mode, reader, writer),
+                    event_name='CLIENT_START_HANDSHAKE'
+                ):
+                if logging:
+                    self.logger.debug(f"Sent a cipher to the server {self.ciphers[self.cipher_index].__class__.__name__}")
             else:
                 raise ConnectionError(f"Server has denied choosed cipher {self.cipher_index}")
 
@@ -74,7 +78,8 @@ class Socks5Client:
         if logging: self.logger.debug("Sent auth methods")
         methods_msg = await default_cipher.client_send_methods(self.socks_version, methods)
 
-        await self.trace_event(session.asend(methods_msg, encrypt=False, log_bytes=False), event_name=f'CLIENT_HELLO')
+        await self.trace_event(session.asend(methods_msg, encrypt=False, log_bytes=False),
+                               event_name=f'SENDING_AUTH_MTHODS')
         if logging: self.logger.debug("Receiving server auth method")
         method_chosen = await self.trace_event(
             default_cipher.client_get_method(self.socks_version, reader),
@@ -123,11 +128,12 @@ class Socks5Client:
                                            username=username, password=password, logging=False)
 
             cmd_bytes = await session.cipher.client_command(self.socks_version, self.user_commands['ping'], '0.0.0.0', 0)
-            await self.trace_event(session.asend(cmd_bytes, encrypt=False, log_bytes=False), event_name=f'CLIENT_CMD_SEND')
+            await self.trace_event(session.asend(cmd_bytes, encrypt=False, log_bytes=False),
+                                   event_name=f'CLIENT_CMD_SEND_ping')
 
             address, port = await self.trace_event(
                 session.cipher.client_connect_confirm(session.reader),
-                event_name=f'SERVER_CMD_CONFIRM'
+                event_name=f'SERVER_CMD_CONFIRM_ping'
             )
 
             self.logger.debug(f"Pong from proxy")
@@ -145,11 +151,12 @@ class Socks5Client:
         cmd_bytes = await session.cipher.client_command(
             self.socks_version, self.user_commands['connect'], target_host, target_port
         )
-        await self.trace_event(session.asend(cmd_bytes, encrypt=False, log_bytes=False), event_name=f'CLIENT_CMD_SEND')
+        await self.trace_event(session.asend(cmd_bytes, encrypt=False, log_bytes=False),
+                               event_name=f'CLIENT_CMD_SEND_connect')
 
         address, port = await self.trace_event(
             session.cipher.client_connect_confirm(session.reader),
-            event_name=f'SERVER_CMD_CONFIRM'
+            event_name=f'SERVER_CMD_CONFIRM_connect'
         )
 
         self.logger.debug(f"Connected to {target_host}:{target_port} through proxy")
@@ -166,11 +173,11 @@ class Socks5Client:
         cmd_bytes = await session.cipher.client_command(
             self.socks_version, self.user_commands['associate'], target_host, target_port
         )
-        await self.trace_event(session.asend(cmd_bytes, encrypt=False, log_bytes=False), event_name=f'CLIENT_CMD_SEND')
+        await self.trace_event(session.asend(cmd_bytes, encrypt=False, log_bytes=False), event_name=f'CLIENT_CMD_SEND_assoc')
 
         udp_host, udp_port = await self.trace_event(
             session.cipher.client_connect_confirm(session.reader),
-            event_name=f'SERVER_CMD_CONFIRM'
+            event_name=f'SERVER_CMD_CONFIRM_assoc'
         )
         udp_session = await UDP_ProxySession.create(udp_host, udp_port, self.udp_cipher.copy(), target_host, target_port)
 
@@ -440,7 +447,7 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
         self.logger.error(f"{self} error: {exc}")
 
     def connection_lost(self, exc):
-        self.logger.error(f"{self} connection with {self.client_ip}:{self.client_port} closed")
+        pass # self.logger.error(f"{self} connection with {self.client_ip}:{self.client_port} closed")
 
     def raw_send(self, data: bytes):
         if self.transport is not None:
@@ -663,10 +670,11 @@ class Socks5_TCP_Retranslator(Socks5Client):
         cmd_bytes = await remote_session.cipher.client_command(
             self.socks_version, self.user_commands['ping'], addr, port
         )
-        await self.trace_event(remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False), event_name='CLIENT_CMD_SEND')
+        await self.trace_event(remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False),
+                               event_name='CLIENT_CMD_SEND_ping')
         try:
             address, port = await self.trace_event(
-                remote_session.cipher.client_connect_confirm(remote_session.reader), event_name='SERVER_CMD_CONFIRM'
+                remote_session.cipher.client_connect_confirm(remote_session.reader), event_name='SERVER_CMD_CONFIRM_ping'
             )
         except ConnectionError as e:
             self.logger.error(e)
@@ -683,10 +691,11 @@ class Socks5_TCP_Retranslator(Socks5Client):
         cmd_bytes = await remote_session.cipher.client_command(
             self.socks_version, self.user_commands['connect'], addr, port
         )
-        await self.trace_event(remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False), event_name='CLIENT_CMD_SEND')
+        await self.trace_event(remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False),
+                               event_name='CLIENT_CMD_SEND_connect')
         try:
             address, port = await self.trace_event(
-                remote_session.cipher.client_connect_confirm(remote_session.reader), event_name='SERVER_CMD_CONFIRM'
+                remote_session.cipher.client_connect_confirm(remote_session.reader), event_name='SERVER_CMD_CONFIRM_connect'
             )
         except ConnectionError as e:
             self.logger.error(e)
@@ -725,9 +734,9 @@ class Socks5_TCP_Retranslator(Socks5Client):
             self.socks_version, self.user_commands['associate'], addr, port
         )
         await self.trace_event(remote_session.asend(cmd_bytes, encrypt=False, log_bytes=False),
-                               event_name='CLIENT_CMD_SEND')
+                               event_name='CLIENT_CMD_SEND_assoc')
         address, port = await self.trace_event(remote_session.cipher.client_connect_confirm(remote_session.reader),
-                                               event_name='SERVER_CMD_CONFIRM')
+                                               event_name='SERVER_CMD_CONFIRM_assoc')
 
         self.logger.debug(f"Establishing UDP connection to {address}:{port}...")
         loop = asyncio.get_running_loop()
@@ -835,9 +844,9 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
         self.logger.info(f'Local client connected {user}')
 
-        addr, port, command = await default_cipher.server_handle_command(
+        addr, port, command = await self.trace_event(default_cipher.server_handle_command(
             self.socks_version, self.server_commands, client_reader
-        )
+        ), event_name='HANDLE_CLIENT_CMD')
         self.logger.info(f'Local client {user} sent command {command.__qualname__} to {addr}:{port}')
         return addr, port, command, default_cipher, user
 

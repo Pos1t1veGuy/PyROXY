@@ -7,11 +7,12 @@ import re
 import ipaddress
 import netifaces
 import json
+import socket
 import psutil
 import asyncio
 from pathlib import Path
 
-from ..base_cipher import resolve_doh
+from ..base_cipher import resolve_domain
 
 
 class Tun2Socks:
@@ -168,10 +169,12 @@ class Tun2Socks:
                     if re.match(r'^\d+\.\d+\.\d+\.\d+$', host):
                         ips = [host]
                     else:
-                        ips = asyncio.run(resolve_doh(host, resolver_urls=resolver_urls))
-                    for ip in ips:
-                        self.cmd_run(f'route add {ip} mask 255.255.255.255 {self.interface_ip} metric 1 if {iface_id}')
-                        print(f'[+] Routed "{host}" ({ip}) via tunnel')
+                        try:
+                            ip = resolve_domain(host)
+                            self.cmd_run(f'route add {ip} mask 255.255.255.255 {self.interface_ip} metric 1 if {iface_id}')
+                            print(f'[+] Routed "{host}" ({ip}) via tunnel')
+                        except socket.gaierror:
+                            print(f'[!] Failed to route "{host}": {e}')
                 except Exception as e:
                     print(f'[!] Failed to route "{host}": {e}')
 

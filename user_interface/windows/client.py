@@ -7,15 +7,16 @@ import signal
 import subprocess
 import ipaddress
 import traceback
+import socket
 from pathlib import Path
 from logging.handlers import TimedRotatingFileHandler
 
 from pyroxy.proxy_client import Socks5_TCP_Retranslator
 from pyroxy.mux import Socks5_TCP_Mux_Retranslator
 from pyroxy.ciphers import *
-from pyroxy.base_cipher import resolve_doh
 from pyroxy.wrappers import HTTP_WS_Wrapper
 from pyroxy.tunnel import Tun2Socks
+from pyroxy.base_cipher import resolve_domain
 
 
 APP_VERSION = '1.0.2'
@@ -102,17 +103,13 @@ def main():
         ipa = ipaddress.ip_address(args.host)
         remote_host = args.host
     except ValueError:
-        try:
-            remote_host = asyncio.run(resolve_doh(args.host))[0]
-            remote_domain = args.host
-        except (RuntimeError, IndexError):
-            print(f'[e] Can not resolve name {args.host}')
-            sys.exit(1)
+        remote_host = resolve_domain(args.host)
+        remote_domain = args.host
 
     tunnel = Tun2Socks(remote_host, white_list=white_list, path_to_exe=args.tun2socks_path,
                        silent=not bool(args.tunnel_debug))
+    tunnel.stop() # to delete broken routes
     if args.auto_forward_traffic == 1:
-        tunnel.stop() # to delete broken routes
         print('[+] Auto forward enabled')
         tunnel.start(args.local_host, args.local_port)
 

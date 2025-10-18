@@ -157,16 +157,16 @@ Connection: close
             "Connection": "close",
         }
 
-        try:
-            response = requests.get(
-                f"http{'s' if self.use_ssl else ''}://{self.host if self.use_ssl else self.ip}{self.http_path}",
-                headers=headers,
-                timeout=self.timeout,
-                verify=self.use_ssl
-            )
-            return response.status_code == 200
-        except requests.RequestException as e:
-            raise ConnectionError(f"HTTP handshake failed: {e}")
+        # try:
+        #     response = requests.get(
+        #         f"http{'s' if self.use_ssl else ''}://{self.host if self.use_ssl else self.ip}{self.http_path}",
+        #         headers=headers,
+        #         timeout=self.timeout,
+        #         verify=self.use_ssl
+        #     )
+        #     return response.status_code == 200
+        # except requests.RequestException as e:
+        #     raise ConnectionError(f"HTTP handshake failed: {e}")
 
     async def http_server_hello(self, server: 'Socks5Server', reader: asyncio.StreamReader,
                                 writer: asyncio.StreamWriter, request_str: str) -> bool:
