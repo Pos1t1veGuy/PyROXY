@@ -8,6 +8,7 @@ import subprocess
 import ipaddress
 import traceback
 import socket
+import asyncio
 from pathlib import Path
 from logging.handlers import TimedRotatingFileHandler
 
@@ -43,6 +44,7 @@ def make_log(filename: str):
 
 
 def main():
+    tunnel = None
     parser = argparse.ArgumentParser(
         description="PyROXY - makes encrypted connection to pyroxy socks5 server with selested user cipher and wrapper"
     )
@@ -69,8 +71,8 @@ def main():
     parser.add_argument("--local_port", type=int, default=1080, help="Local client (retranslator) port")
 
     parser.add_argument("--white_list_file", default='white_list.txt', help="List of domens or ips thats needs to proxy")
-    parser.add_argument("--log_file", type=int, choices=[1,0], default=0, help="Enable logger file (0 - false, 1 - true)")
-    parser.add_argument("--tunnel_debug", type=int, choices=[1,0], default=0, help="Enable tunnel log (0 - false, 1 - true)")
+    parser.add_argument("--log_file", type=int, choices=[1, 0], default=0, help="Enable logger file (0 - false, 1 - true)")
+    parser.add_argument("--tunnel_debug", type=int, choices=[1, 0], default=0, help="Enable tunnel log (0 - false, 1 - true)")
     parser.add_argument("--logging_level", choices=logging_levels, default='info', help="Application logging level")
 
     parser.add_argument("--tun2socks_path", default=Path(__file__).parent / "tun2socks.exe",
@@ -79,69 +81,70 @@ def main():
     parser.add_argument(
         "--auto_forward_traffic",
         type=int,
-        choices=[0,1],
+        choices=[0, 1],
         default=1,
         help="Automatically forward all TCP traffic to local SOCKS5 (0 - false, 1 - true) (default: 1)"
     )
 
     args = parser.parse_args()
 
-    white_list = []
-    if os.path.isfile(args.white_list_file):
+    try:
+        white_list = []
+        if os.path.isfile(args.white_list_file):
+            try:
+                white_list = [
+                    domain for domain in open(args.white_list_file, 'r').read().split('\n')
+                    if (not domain.startswith('#')) and (not domain.startswith(' #')) and (not domain in ['', ' '])
+                ]
+            except Exception as ex:
+                print(f'[e] Error when open white list file: {ex}')
+        else:
+            open(args.white_list_file, 'w').write('# Put a domains or an IPs here')
+
+        remote_domain = ''
         try:
-            white_list = [
-                domain for domain in open(args.white_list_file, 'r').read().split('\n')
-                if (not domain.startswith('#')) and (not domain.startswith(' #')) and (not domain in ['', ' '])
-            ]
-        except Exception as ex:
-            print(f'[e] Error when open white list file: {ex}')
-    else:
-        open(args.white_list_file, 'w').write('# Put a domains or an IPs here')
+            ipa = ipaddress.ip_address(args.host)
+            remote_host = args.host
+        except ValueError:
+            remote_host = resolve_domain(args.host)
+            remote_domain = args.host
 
-    remote_domain = ''
-    try:
-        ipa = ipaddress.ip_address(args.host)
-        remote_host = args.host
-    except ValueError:
-        remote_host = resolve_domain(args.host)
-        remote_domain = args.host
+        tunnel = Tun2Socks(remote_host, white_list=white_list, path_to_exe=args.tun2socks_path,
+                           silent=not bool(args.tunnel_debug))
 
-    tunnel = Tun2Socks(remote_host, white_list=white_list, path_to_exe=args.tun2socks_path,
-                       silent=not bool(args.tunnel_debug))
-    tunnel.stop() # to delete broken routes
-    if args.auto_forward_traffic == 1:
-        print('[+] Auto forward enabled')
-        tunnel.start(args.local_host, args.local_port)
+        tunnel.stop() # to delete broken routes
+        if args.auto_forward_traffic == 1:
+            print('[+] Auto forward enabled')
+            tunnel.start(args.local_host, args.local_port)
 
-    if args.key == '.':
-        print('[e] You need to input your KEY into "--key=..."')
-        sys.exit(1)
-    elif args.username == '.':
-        print('[e] You need to input your USERNAME into "--username=..."')
-        sys.exit(1)
-    elif args.password == '.':
-        print('[e] You need to input your PASSWORD into "--password=..."')
-        sys.exit(1)
-    elif args.host == '.':
-        print('[e] You need to input server HOST into "--host=..."')
-        sys.exit(1)
+        if args.key == '.':
+            print('[e] You need to input your KEY into "--key=..."')
+            sys.exit(1)
+        elif args.username == '.':
+            print('[e] You need to input your USERNAME into "--username=..."')
+            sys.exit(1)
+        elif args.password == '.':
+            print('[e] You need to input your PASSWORD into "--password=..."')
+            sys.exit(1)
+        elif args.host == '.':
+            print('[e] You need to input server HOST into "--host=..."')
+            sys.exit(1)
 
-    '''
-    You can't mix up this order "available_ciphers" of ciphers, otherwise the server and client will mix up their
-    ciphers and the connection will fail.
-    '''
-    key = bytes.fromhex(args.key)
-    default_key = bytes.fromhex(args.default_key)
-    available_ciphers = [
-        Cipher(
-            wrapper=HTTP_WS_Wrapper(host=remote_domain, server_ip=remote_host)
-        ), # starts a handshake with client_hello and server_hello from wrapper
-        AES_CTR(key=default_key, iv=os.urandom(16)),
-        ChaCha20_Poly1305(key=default_key),
-        Cipher(), # without wrapper
-    ]
+        '''
+        You can't mix up this order "available_ciphers" of ciphers, otherwise the server and client will mix up their
+        ciphers and the connection will fail.
+        '''
+        key = bytes.fromhex(args.key)
+        default_key = bytes.fromhex(args.default_key)
+        available_ciphers = [
+            Cipher(
+                wrapper=HTTP_WS_Wrapper(host=remote_domain, server_ip=remote_host)
+            ), # starts a handshake with client_hello and server_hello from wrapper
+            AES_CTR(key=default_key, iv=os.urandom(16)),
+            ChaCha20_Poly1305(key=default_key),
+            Cipher(), # without wrapper
+        ]
 
-    try:
         CLIENT = Socks5_TCP_Mux_Retranslator(
             remote_host, int(args.port),
             remote_domain=remote_domain,
@@ -158,7 +161,7 @@ def main():
             CLIENT.logger.addHandler(make_log("client.log"))
 
         CLIENT.listen_and_forward(local_host=args.local_host, local_port=args.local_port)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, RuntimeError):
         pass
     except Exception as ex:
         if args.logging_level.lower() == "debug":
@@ -167,13 +170,23 @@ def main():
         print(f'[e] {ex}')
     finally:
         print('[+] client closed')
-        tunnel.stop()
+        if tunnel:
+            tunnel.stop()
 
     return tunnel
 
+def shutdown(sig, frame):
+    print("[+] Shutting down...")
+    try:
+        for task in asyncio.all_tasks():
+            task.cancel()
+    except RuntimeError:
+        pass
+
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGINT, lambda sig, frame: sys.exit(0))
-    signal.signal(signal.SIGTERM, lambda sig, frame: sys.exit(0))
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
     tunnel = main()
-    tunnel.stop()
+    if tunnel:
+        tunnel.stop()

@@ -5,7 +5,8 @@ import asyncio
 import logging
 import aiohttp
 import json
-import dns.resolver
+import requests
+import certifi
 import ipaddress as ipa
 from functools import lru_cache
 
@@ -136,20 +137,18 @@ def get_address(data: bytes, address_type: int) -> Tuple[str, int]:
 
 def resolve_domain(domain: str, retry: bool = True) -> str:
     try:
-        resolver = dns.resolver.Resolver()
-        resolver = dns.resolver.Resolver(configure=False)
-        resolver.nameservers = [
-            "https://cloudflare-dns.com/dns-query",
-            "https://dns.google/dns-query",
-            "https://dns.adguard-dns.com/dns-query",
-        ]
-        resolver.timeout = 5
-        resolver.lifetime = 5
-        resolver.use_doh = True
-        answer = resolver.resolve(domain, 'A')
-        return answer[0].to_text()
+        headers = {"accept": "application/dns-json"}
+        params = {"name": domain, "type": "A"}
+        r = requests.get("https://cloudflare-dns.com/dns-query", headers=headers, params=params, timeout=5,
+                         verify=certifi.where())
+        data = json.loads(r.text)
+        return data["Answer"][0]["data"]
     except:
-        return resolve_domain(domain, retry=False)
+        if retry:
+            print(4,9)
+            return resolve_domain(domain, retry=False)
+        else:
+            raise ConnectionError(f'Can not resolve domain {domain}')
 
 
 class Cipher:

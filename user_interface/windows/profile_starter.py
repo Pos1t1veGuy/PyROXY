@@ -26,6 +26,11 @@ def is_admin() -> bool:
         return os.geteuid() == 0
 
 
+def parse_version(v: str) -> tuple[int, ...]:
+    v = v.lstrip('v').split('-')[0]
+    parts = [int(p) for p in v.split('.') if p.isdigit()]
+    return tuple(parts)
+
 def rq_get_with_retry(url: str, retries: int = 3, delay: int = 2) -> rq.Response:
     for attempt in range(retries):
         try:
@@ -98,7 +103,7 @@ def check_updates():
 
     current_version = get_client_version("client.exe" if not "--py" in sys.argv else "python client.py")
 
-    if repo_version != current_version:
+    if parse_version(repo_version) > parse_version(current_version):
         agreement = input(
             '[+] PyROXY client is outdated and needs to be updated. Leaving the current version may'
             f' cause compatibility issues.\n\n{current_version} -> {repo_version}\n'

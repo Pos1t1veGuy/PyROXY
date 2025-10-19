@@ -1,9 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
 import site
+import certifi
 
 site_packages = Path(site.getsitepackages()[1])
 lib = Path(site.getsitepackages()[0]) / 'Lib'
+"C:\Python313\Lib\site-packages\certifi\cacert.pem;certifi"
 
 a = Analysis(
     ['client.py'],
@@ -15,6 +17,7 @@ a = Analysis(
     datas=[
         (str(site_packages / 'fake_useragent' / 'data' / '*'), 'fake_useragent/data'),
         (str(lib / 'pyroxy' / 'wrappers' / '*'), 'pyroxy/wrappers'),
+        (certifi.where(), 'certifi'),
     ],
     hiddenimports=['pyroxy'],
     hookspath=[],

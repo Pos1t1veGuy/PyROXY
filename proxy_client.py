@@ -55,12 +55,13 @@ class Socks5Client:
         session = session_class(self, reader, writer, cipher, proxy_host, proxy_port,
                                 username=username, password=password, log_bytes=self.log_bytes)
         self.sessions.append(session)
+        await self.trace_event(default_cipher.client_hello(self, reader, writer), event_name='CLIENT_HELLO')
+        if logging: self.logger.debug("Sent client_hello")
         if logging:
             self.logger.info(
                 f"Connected to SOCKS5 proxy at {proxy_host}:{proxy_port} using {self.ciphers[self.cipher_index].__class__.__name__}"
             )
-        await self.trace_event(default_cipher.client_hello(self, reader, writer), event_name='CLIENT_HELLO')
-        if logging: self.logger.debug("Sent client_hello")
+
         if not self.default_socks5:
             if await self.trace_event(
                     default_cipher.client_start_handshake(self, self.cipher_index, proxying_mode, reader, writer),
