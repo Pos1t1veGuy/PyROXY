@@ -7,6 +7,8 @@ import zipfile
 import requests as rq
 import time
 from pathlib import Path
+from colorama import init, Fore, Style, init
+init()
 
 
 client = 'client.exe'
@@ -38,7 +40,7 @@ def rq_get_with_retry(url: str, retries: int = 3, delay: int = 2) -> rq.Response
             resp.raise_for_status()
             return resp
         except rq.exceptions.RequestException as e:
-            print(f"[!] Attempt {attempt + 1}/{retries} failed: {e}")
+            print(f"{Fore.RED}[!] Attempt {attempt + 1}/{retries} failed: {e}{Style.RESET_ALL}")
             if attempt < retries - 1:
                 time.sleep(delay)
     raise ConnectionError(f"Failed to fetch {url} after {retries} attempts")
@@ -88,7 +90,8 @@ def download_file(url: str, dest: Optional[str] = None) -> str:
                     f.write(chunk)
                     downloaded += len(chunk)
                     done = int(50 * downloaded / total_size) if total_size else 0
-                    sys.stdout.write(f'\r[+] Downloading: [{"█" * done}{"." * (50 - done)}] {downloaded}/{total_size} bytes')
+                    sys.stdout.write(f'\r[+] Downloading: [{Fore.GREEN}{"█" * done}{"." * (50 - done)}] '
+                                     f'{downloaded}/{total_size} bytes{Style.RESET_ALL}')
                     sys.stdout.flush()
     return dest
 
@@ -98,16 +101,16 @@ def check_updates():
     try:
         repo_version, win_zip_url = get_windows_zip_version(REPO_URL)
     except ConnectionError:
-        print('[w] Github service is unavailable, unable to check for updates')
+        print(f'{Fore.YELLOW}[w] Github service is unavailable, unable to check for updates{Style.RESET_ALL}')
         return
 
     current_version = get_client_version("client.exe" if not "--py" in sys.argv else "python client.py")
 
     if parse_version(repo_version) > parse_version(current_version):
         agreement = input(
-            '[+] PyROXY client is outdated and needs to be updated. Leaving the current version may'
-            f' cause compatibility issues.\n\n{current_version} -> {repo_version}\n'
-            '\nSkip updating?\nY/N: ')
+            f'{Fore.GREEN}[+] PyROXY client is outdated and needs to be updated. Leaving the current version may '
+            f'cause compatibility issues.\n    {Fore.RED}{current_version} {Fore.GREEN}-> {Fore.YELLOW}{repo_version}\n'
+            f'{Fore.GREEN}Skip updating? {Style.RESET_ALL}Y/N: ')
 
         if agreement.lower() in ['y', 'yes', 'н']:
             print('[-] Cancelled by user')
@@ -115,7 +118,7 @@ def check_updates():
             zip_path = download_file(win_zip_url)
             with zipfile.ZipFile(BASE_DIR / zip_path, 'r') as zip_ref:
                 zip_ref.extract(updater, BASE_DIR)
-            print(f'\n[+] Download finished')
+            print(f'\n{Fore.GREEN}[+] Download finished{Style.RESET_ALL}')
             subprocess.Popen([str(BASE_DIR / updater), str(BASE_DIR / zip_path)])
             sys.exit(0)
     else:
@@ -138,7 +141,7 @@ if __name__ == '__main__':
             print('[+] Running with profile config...')
             parameters = ' --'.join(open('profile.pyroxy', 'r').read().split('\n'))
             os.system(
-                f'{client} --{parameters}' + ' '.join(sys.argv[1:]).replace('--py', '').replace('--update_skip', '')
+                f'{client} --{parameters} ' + ' '.join(sys.argv[1:]).replace('--py', '').replace('--update_skip', '')
             )
             input('[+] Press ENTER to exit. ')
         else:
@@ -148,6 +151,6 @@ if __name__ == '__main__':
         pass
     except Exception as ex:
         try:
-            input(f'[e] {ex}')
+            input(f'{Fore.RED}[e] {ex}{Style.RESET_ALL}')
         except KeyboardInterrupt:
             pass

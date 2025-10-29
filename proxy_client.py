@@ -6,6 +6,7 @@ import logging
 import ipaddress
 import struct
 import time
+import json
 
 from .logger_setup import *
 from .base_cipher import Cipher, REPLYES_CODES, get_address
@@ -36,6 +37,7 @@ class Socks5Client:
             'connect': 0x01,
             'bind': 0x02,
             'associate': 0x03,
+            'info': 0x04,
         }
         self.sessions = []
 
@@ -184,6 +186,30 @@ class Socks5Client:
 
         self.logger.debug(f"Got an associated UDP server {udp_session.host}:{udp_session.port} through proxy")
         return udp_session, session
+
+    async def connections_info(self, proxy_host: str = '127.0.0.1', proxy_port: int = 1080,
+                               username: Optional[str] = None, password: Optional[str] = None) -> dict:
+        try:
+            self.logger.debug(f"Getting info from proxy")
+            session = await self.handshake(proxy_host=proxy_host, proxy_port=proxy_port,
+                                           username=username, password=password, logging=False)
+
+            cmd_bytes = await session.cipher.client_command(self.socks_version, self.user_commands['info'], '0.0.0.0', 0)
+            await self.trace_event(session.asend(cmd_bytes, encrypt=False, log_bytes=False),
+                                   event_name=f'CLIENT_CMD_SEND_info')
+
+            address, port = await self.trace_event(
+                session.cipher.client_connect_confirm(session.reader),
+                event_name=f'SERVER_CMD_CONFIRM_info'
+            )
+            data = await session.aread()
+            return json.loads(data)
+
+        except json.decoder.JSONDecodeError:
+            self.logger.debug(f'Server received an invalid response')
+        except Exception as ex:
+            self.logger.debug(f'Ping received an error: {ex}')
+        return {}
 
 
     async def trace_event(self, coro: Awaitable, event_name: str, ex_class: Exception = ConnectionError):

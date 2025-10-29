@@ -145,7 +145,6 @@ def resolve_domain(domain: str, retry: bool = True) -> str:
         return data["Answer"][0]["data"]
     except:
         if retry:
-            print(4,9)
             return resolve_domain(domain, retry=False)
         else:
             raise ConnectionError(f'Can not resolve domain {domain}')

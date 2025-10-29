@@ -6,6 +6,7 @@ import struct
 import socket
 import time
 import traceback
+import json
 
 from .logger_setup import *
 from .base_cipher import Cipher, REPLYES_CODES, get_address, resolve_domain, encode_ip
@@ -27,11 +28,13 @@ class Socks5Server:
                  user_commands: Optional[Dict[bytes, callable]] = None,
                  accept_anonymous: bool = False,
                  log_bytes: bool = True,
-                 address_changing: bool = True):
+                 address_changing: bool = True,
+                 check_user_permissions: bool = False):
 
         self.socks_version = 5
         self.accept_anonymous = accept_anonymous
         self.address_changing = address_changing
+        self.check_user_permissions = check_user_permissions
         self.host = host
         self.udp_host = udp_host
         self.port = port
@@ -54,7 +57,7 @@ class Socks5Server:
 
         self.user_commands = USER_COMMANDS if user_commands is None else user_commands
         self.asyncio_server = None
-        self.users = []
+        self.users: List['User'] = []
         self.bytes_sent = 0
         self.bytes_received = 0
         self.stop = False
@@ -124,6 +127,7 @@ class Socks5Server:
                                                event_name=f'AUTH')
 
             user.username, user.password, user.key = auth_data
+            user.is_superuser = self.db_handler.is_superuser(user.username)
         else:
             data = await default_cipher.server_send_method_to_user(self.socks_version, 0xFF)
             await self.trace_event(self.send(user, data, log_bytes=False), event_name=f'SEND_AUTH_METHOD')
@@ -324,6 +328,8 @@ class Socks5Server:
             await self.close_writer(user.writer)
         except (ConnectionResetError, OSError):
             pass
+        if user in self.users:
+            self.users.remove(user)
         self.logger.info(f'{user} is disconnected')
 
     async def close(self):
@@ -351,7 +357,7 @@ class Socks5Server:
 class User:
     def __init__(self, server: Socks5Server, ip: str, port: int, writer: asyncio.StreamWriter, id: Optional[int] = None,
                  key: str = '', handshaked: bool = False, username: str = 'Anonymous', password: Optional[str] = None,
-                 cipher: Optional[Cipher] = None):
+                 cipher: Optional[Cipher] = None, is_superuser: bool = False):
 
         self.server = server
         self.id = id
@@ -364,6 +370,7 @@ class User:
         self.password = password
         self.key = key
         self.cipher = cipher
+        self.is_superuser = is_superuser
 
         self.connected = True
 
@@ -687,19 +694,9 @@ class ConnectionMethods:
     async def CONNECTIONS_INFO(server: Socks5Server, addr: str, port: int, user: User, cipher: Cipher,
                             client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter
                             ) -> Tuple[int, List[int]]:
-        server.logger.debug(f"Getting connections info for {user}...")
-
-        try:
-            remote_reader, remote_writer = await asyncio.open_connection(addr, port)
-            local_ip, local_port = remote_writer.get_extra_info("sockname")
-            reply_frames = await server.trace_event(
-                cipher.server_make_reply(server.socks_version, REPLYES_CODES['succeeded'], local_ip, local_port),
-                event_name=f'CMD_CONFIRM'
-            )
-            client_writer.write(b''.join(reply_frames))
-            await client_writer.drain()
-        except Exception as e:
-            server.logger.warning(f"Failed to connect to {addr}:{port} => {e}")
+        server.logger.debug(f"Getting CONNECTIONS_INFO for {user}...")
+        if not user.is_superuser and server.check_user_permissions:
+            server.logger.warning(f"Rejected CONNECTIONS_INFO cmd from {user} (not a superuser)")
             reply_frames = await server.trace_event(
                 cipher.server_make_reply(server.socks_version, REPLYES_CODES['host_unreachable'], '0.0.0.0', 0),
                 event_name=f'CMD_CONFIRM'
@@ -708,7 +705,30 @@ class ConnectionMethods:
             await client_writer.drain()
             return 1, [0,0]
 
-        server.logger.debug(f'{user} connected to {addr}:{port}')
+        reply_frames = await server.trace_event(
+            cipher.server_make_reply(server.socks_version, REPLYES_CODES['succeeded'], '0.0.0.0', 0),
+            event_name=f'CMD_CONFIRM'
+        )
+        client_writer.write(b''.join(reply_frames))
+
+        response = {}
+        for user in server.users:
+            response[user.username] = {
+                'ip': user.ip,
+                'is_superuser': user.is_superuser,
+                'connections': 0,
+                'ids': [],
+                'ports': [],
+            }
+            for another_user in server.users:
+                if another_user.username == user.username:
+                    response[user.username]['connections'] += 1
+                    response[user.username]['ids'].append(another_user.id)
+                    response[user.username]['ports'].append(another_user.port)
+
+        client_writer.write(b''.join(cipher.encrypt(json.dumps(response).encode())))
+        await client_writer.drain()
+        return 0, [0,0]
 
 
 USER_COMMANDS = {

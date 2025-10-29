@@ -11,6 +11,8 @@ import socket
 import asyncio
 from pathlib import Path
 from logging.handlers import TimedRotatingFileHandler
+from colorama import init, Fore, Style, init
+init()
 
 from pyroxy.proxy_client import Socks5_TCP_Retranslator
 from pyroxy.mux import Socks5_TCP_Mux_Retranslator
@@ -23,7 +25,22 @@ from pyroxy.base_cipher import resolve_domain
 APP_VERSION = '1.0.4'
 
 
-def make_log(filename: str):
+class ColorFormatter(logging.Formatter):
+    COLORS = {
+        logging.DEBUG: Fore.LIGHTBLACK_EX,
+        logging.INFO: Fore.WHITE,
+        logging.WARNING: Fore.YELLOW,
+        logging.ERROR: Fore.RED,
+        logging.CRITICAL: Fore.MAGENTA + Style.BRIGHT,
+    }
+
+    def format(self, record):
+        color = self.COLORS.get(record.levelno, Fore.WHITE)
+        asctime = self.formatTime(record, self.datefmt)
+        return f"{color}[{asctime}] [{record.levelname}] {record.getMessage()}{Style.RESET_ALL}"
+
+
+def make_loggers(filename: str):
     log_file = Path(__file__).parent / 'logs' / filename
     os.makedirs(log_file.parent, exist_ok=True)
 
@@ -40,7 +57,16 @@ def make_log(filename: str):
         style="{"
     )
     file_handler.setFormatter(formatter)
-    return file_handler
+
+
+    console_handler = logging.StreamHandler()
+    console_formatter = ColorFormatter(
+        fmt="[{asctime}] [{levelname}] {message}",
+        datefmt="%H:%M:%S",
+        style="{"
+    )
+    console_handler.setFormatter(console_formatter)
+    return file_handler, console_handler
 
 
 def main():
@@ -97,7 +123,7 @@ def main():
                     if (not domain.startswith('#')) and (not domain.startswith(' #')) and (not domain in ['', ' '])
                 ]
             except Exception as ex:
-                print(f'[e] Error when open white list file: {ex}')
+                print(f'{Fore.RED}[e] Error when open white list file: {ex}{Style.RESET_ALL}')
         else:
             open(args.white_list_file, 'w').write('# Put a domains or an IPs here')
 
@@ -110,16 +136,16 @@ def main():
             remote_domain = args.host
 
         if args.key == '.':
-            print('[e] You need to input your KEY into "--key=..."')
+            print(f'{Fore.RED}[e] You need to input your KEY into "--key=..."{Style.RESET_ALL}')
             sys.exit(1)
         elif args.username == '.':
-            print('[e] You need to input your USERNAME into "--username=..."')
+            print(f'{Fore.RED}[e] You need to input your USERNAME into "--username=..."{Style.RESET_ALL}')
             sys.exit(1)
         elif args.password == '.':
-            print('[e] You need to input your PASSWORD into "--password=..."')
+            print(f'{Fore.RED}[e] You need to input your PASSWORD into "--password=..."{Style.RESET_ALL}')
             sys.exit(1)
         elif args.host == '.':
-            print('[e] You need to input server HOST into "--host=..."')
+            print(f'{Fore.RED}[e] You need to input server HOST into "--host=..."{Style.RESET_ALL}')
             sys.exit(1)
 
         '''
@@ -149,34 +175,36 @@ def main():
         )
 
         CLIENT.logger.setLevel(getattr(logging, args.logging_level.upper(), logging.INFO))
+        file_log, console_log = make_loggers("client.log")
+        CLIENT.logger.addHandler(console_log)
         if args.log_file == 1:
-            CLIENT.logger.addHandler(make_log("client.log"))
+            CLIENT.logger.addHandler(file_log)
+        CLIENT.logger.propagate = False
 
         tunnel = Tun2Socks(remote_host, white_list=white_list, path_to_exe=args.tun2socks_path,
                            silent=not bool(args.tunnel_debug))
 
         tunnel.stop() # to delete broken routes
         if args.auto_forward_traffic == 1:
-            print('[+] Auto forward enabled')
+            print(f'[+] Auto forward enabled')
             tunnel.start(args.local_host, args.local_port)
 
         CLIENT.listen_and_forward(local_host=args.local_host, local_port=args.local_port)
-    # except (KeyboardInterrupt, RuntimeError):
-    #     pass
-    # except Exception as ex:
-    #     if args.logging_level.lower() == "debug":
-    #         print("[!] Full traceback:")
-    #         traceback.print_exc()
-    #     print(f'[e] {ex}')
+    except (KeyboardInterrupt, RuntimeError):
+        pass
+    except Exception as ex:
+        if args.logging_level.lower() == "debug":
+            print(f"{Fore.RED}[!] Full traceback:\n{traceback.format_exc()}")
+        print(f'[e] {ex}{Style.RESET_ALL}')
     finally:
-        print('[+] client closed')
+        print(f'[+] client closed')
         if tunnel:
             tunnel.stop()
 
     return tunnel
 
 def shutdown(sig, frame):
-    print("[+] Shutting down...")
+    print(f"[+] Shutting down...")
     try:
         for task in asyncio.all_tasks():
             task.cancel()

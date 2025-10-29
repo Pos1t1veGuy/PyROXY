@@ -12,6 +12,8 @@ import psutil
 import asyncio
 import platform
 from pathlib import Path
+from colorama import init, Fore, Style, init
+init()
 
 from ..base_cipher import resolve_domain
 
@@ -151,13 +153,13 @@ class Tun2Socks_Windows(Tun2Socks):
         gws = netifaces.gateways()
         default_gateway = gws.get('default', {}).get(netifaces.AF_INET)
         if not default_gateway:
-            print('[e] can not find LAN gateway IP')
+            print(f'{Fore.RED}[e] can not find LAN gateway IP{Style.RESET_ALL}')
             sys.exit(1)
 
         self.gateway_ip, interface_name = default_gateway
         self.def_iface_id = self.get_interface_index_by_gateway(self.gateway_ip)[0]
         if not self.def_iface_id:
-            print(f'[e] can not find LAN gateway id by IP {self.gateway_ip}')
+            print(f'{Fore.RED}[e] can not find LAN gateway id by IP {self.gateway_ip}{Style.RESET_ALL}')
             sys.exit(1)
 
         self.cmd_run(f'route add {self.socks_ext} mask 255.255.255.255 {self.gateway_ip} metric 1 if {self.def_iface_id}')
@@ -172,7 +174,7 @@ class Tun2Socks_Windows(Tun2Socks):
         try:
             iface_id = interfaces[self.tun_name]["idx"]
         except KeyError:
-            print(f'[e] tun2socks "{self.tun_name}" interface not found')
+            print(f'{Fore.RED}[e] tun2socks "{self.tun_name}" interface not found{Style.RESET_ALL}')
             sys.exit(1)
 
         if self.white_list in ([], ['']):
@@ -189,9 +191,9 @@ class Tun2Socks_Windows(Tun2Socks):
                             self.cmd_run(f'route add {ip} mask 255.255.255.255 {self.interface_ip} metric 1 if {iface_id}')
                             print(f'[+] Routed "{host}" ({ip}) via tunnel')
                         except socket.gaierror:
-                            print(f'[!] Failed to route "{host}": {e}')
+                            print(f'{Fore.RED}[!] Failed to route "{host}": {e}{Style.RESET_ALL}')
                 except Exception as e:
-                    print(f'[!] Failed to route "{host}": {e}')
+                    print(f'{Fore.RED}[!] Failed to route "{host}": {e}{Style.RESET_ALL}')
 
 
     def stop(self):
@@ -266,7 +268,7 @@ class Tun2Socks_Linux(Tun2Socks):
         if self.tun_proc: return
 
         if not self.path_to_exe.exists():
-            print(f'[e] tun2socks binary not found: {self.path_to_exe}')
+            print(f'{Fore.RED}[e] tun2socks binary not found: {self.path_to_exe}{Style.RESET_ALL}')
             raise FileNotFoundError(self.path_to_exe)
 
         self._ensure_executable()
@@ -293,7 +295,7 @@ class Tun2Socks_Linux(Tun2Socks):
 
         gw, iface = self.get_default_gateway()
         if not gw or not iface:
-            print('[e] can not find default gateway or interface (need root/CAP_NET_ADMIN)')
+            print(f'{Fore.RED}[e] can not find default gateway or interface (need root/CAP_NET_ADMIN){Style.RESET_ALL}')
             try:
                 self.tun_proc.terminate()
             except Exception:
@@ -315,11 +317,12 @@ class Tun2Socks_Linux(Tun2Socks):
 
             res = self.cmd_run(f"ip route add {server_ip}/32 via {self.gateway_ip} dev {self.def_iface_name}")
         except Exception as e:
-            print(f"[!] Failed to add route to proxy server {self.socks_ext}: {e}")
+            print(f"{Fore.RED}[!] Failed to add route to proxy server {self.socks_ext}: {e}{Style.RESET_ALL}")
 
         interfaces = self.get_interfaces()
         if self.tun_name not in interfaces:
-            print(f'[!] Interface {self.tun_name} not found after starting tun2socks; continuing (some binaries create interface lazily).')
+            print(f'{Fore.RED}[!] Interface {self.tun_name} not found after starting tun2socks; '
+                  f'continuing (some binaries create interface lazily).{Style.RESET_ALL}')
         else:
             print(f'[+] Tun interface {self.tun_name} (idx {interfaces[self.tun_name].get("idx")}) ready')
 
@@ -328,7 +331,7 @@ class Tun2Socks_Linux(Tun2Socks):
                 self.cmd_run(f"ip route add 0.0.0.0/0 dev {self.tun_name} metric 1")
                 print(f'[+] Routed all IPs via {self.tun_name}')
             except Exception as e:
-                print(f'[!] Failed to add default route via {self.tun_name}: {e}')
+                print(f'{Fore.RED}[!] Failed to add default route via {self.tun_name}: {e}{Style.RESET_ALL}')
         else:
             for host in self.white_list:
                 try:
@@ -341,9 +344,9 @@ class Tun2Socks_Linux(Tun2Socks):
                             self.cmd_run(f"ip route add {ip}/32 dev {self.tun_name} metric 1")
                             print(f'[+] Routed "{host}" ({ip}) via {self.tun_name}')
                         except Exception as e:
-                            print(f'[!] Failed to route \"{host}\" ({ip}): {e}')
+                            print(f'{Fore.RED}[!] Failed to route \"{host}\" ({ip}): {e}{Style.RESET_ALL}')
                 except Exception as e:
-                    print(f'[!] Failed to route \"{host}\": {e}')
+                    print(f'{Fore.RED}[!] Failed to route \"{host}\": {e}{Style.RESET_ALL}')
 
     def stop(self):
         gw, iface = self.get_default_gateway()
