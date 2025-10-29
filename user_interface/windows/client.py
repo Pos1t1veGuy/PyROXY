@@ -20,7 +20,7 @@ from pyroxy.tunnel import Tun2Socks
 from pyroxy.base_cipher import resolve_domain
 
 
-APP_VERSION = '1.0.3'
+APP_VERSION = '1.0.4'
 
 
 def make_log(filename: str):
@@ -109,14 +109,6 @@ def main():
             remote_host = resolve_domain(args.host)
             remote_domain = args.host
 
-        tunnel = Tun2Socks(remote_host, white_list=white_list, path_to_exe=args.tun2socks_path,
-                           silent=not bool(args.tunnel_debug))
-
-        tunnel.stop() # to delete broken routes
-        if args.auto_forward_traffic == 1:
-            print('[+] Auto forward enabled')
-            tunnel.start(args.local_host, args.local_port)
-
         if args.key == '.':
             print('[e] You need to input your KEY into "--key=..."')
             sys.exit(1)
@@ -160,14 +152,22 @@ def main():
         if args.log_file == 1:
             CLIENT.logger.addHandler(make_log("client.log"))
 
+        tunnel = Tun2Socks(remote_host, white_list=white_list, path_to_exe=args.tun2socks_path,
+                           silent=not bool(args.tunnel_debug))
+
+        tunnel.stop() # to delete broken routes
+        if args.auto_forward_traffic == 1:
+            print('[+] Auto forward enabled')
+            tunnel.start(args.local_host, args.local_port)
+
         CLIENT.listen_and_forward(local_host=args.local_host, local_port=args.local_port)
-    except (KeyboardInterrupt, RuntimeError):
-        pass
-    except Exception as ex:
-        if args.logging_level.lower() == "debug":
-            print("[!] Full traceback:")
-            traceback.print_exc()
-        print(f'[e] {ex}')
+    # except (KeyboardInterrupt, RuntimeError):
+    #     pass
+    # except Exception as ex:
+    #     if args.logging_level.lower() == "debug":
+    #         print("[!] Full traceback:")
+    #         traceback.print_exc()
+    #     print(f'[e] {ex}')
     finally:
         print('[+] client closed')
         if tunnel:

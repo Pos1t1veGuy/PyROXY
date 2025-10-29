@@ -18,11 +18,13 @@ from ..base_cipher import resolve_domain
 
 class Tun2Socks:
     def __new__(cls, *args, **kwargs):
-        system = platform.system().lower()
-        if system == "windows":
-            return Tun2Socks_Windows(*args, **kwargs)
-        else:
-            return Tun2Socks_Linux(*args, **kwargs)
+        if cls is Tun2Socks:
+            system = platform.system().lower()
+            if system == "windows":
+                return Tun2Socks_Windows(*args, **kwargs)
+            else:
+                return Tun2Socks_Linux(*args, **kwargs)
+        return object.__new__(cls)
 
     def __init__(self, socks_ext: str, tun_name: str = "wintun", interface_ip: str = '10.0.0.1', white_list: List[str] = [],
                  path_to_exe: Optional[str] = None, interface_mask: str = '255.255.255.255', silent: bool = True):
