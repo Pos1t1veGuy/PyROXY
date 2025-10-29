@@ -1,7 +1,8 @@
 import json
-import os
+import os, sys
 import logging
 import argparse
+import inspect
 from pathlib import Path
 from logging.handlers import TimedRotatingFileHandler
 
@@ -20,6 +21,7 @@ parser.add_argument("--hosting", type=int, choices=[1,0], default=1, help="hosti
 parser.add_argument("--host", type=str, default='127.0.0.1', help="TCP host")
 parser.add_argument("--udp_host", type=str, default='0.0.0.0', help="UDP host")
 parser.add_argument("--port", type=int, default=8080, help="proxy server port")
+parser.add_argument("--execute", type=str, help="Execute DB handler command, e.g. function(arg1, arg2, kwarg1) or simply help()")
 args = parser.parse_args()
 
 
@@ -64,6 +66,41 @@ SERVER = Mux_Socks5Server(
     host=args.host,
     udp_host=args.udp_host,
 )
+
+if args.execute:
+    allowed_funcs = {}
+
+    for name, attr in inspect.getmembers(SERVER.db_handler):
+        if name.startswith("_"):
+            continue
+        if callable(attr):
+            allowed_funcs[name] = attr
+
+    def print_help() -> int:
+        print("Available DB commands:\n")
+        i = 0
+        for name, func in allowed_funcs.items():
+            i += 1
+            if name == "help":
+                continue
+            sig = inspect.signature(func)
+            ann = inspect.getdoc(func) or ""
+            print(f"  {' ' if i < 10 else ''}{i}. {name}{sig}")
+            if ann:
+                print(f"    → {ann.splitlines()[0]}")
+        print("\nExample usage: --execute \"is_superuser('admin')\"")
+        return 0
+
+    allowed_funcs['help'] = print_help
+
+
+    print('executing database command')
+    result = eval(
+        f"allowed_funcs['{args.execute.split('(')[0]}']{args.execute[len(args.execute.split('(')[0]):]}",
+        {"allowed_funcs": allowed_funcs}
+    )
+    print('result:', result)
+    sys.exit(0)
 
 SERVER.logger.setLevel(getattr(logging, args.logging.upper(), logging.INFO))
 

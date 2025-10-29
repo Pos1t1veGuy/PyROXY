@@ -291,7 +291,7 @@ class Mux_Socks5Server(Socks5Server):
                     self.clients_udp_servers[stream.mux.user.username] -= 1
         except (asyncio.IncompleteReadError, ConnectionResetError, ConnectionError):
             self.logger.info(f"[MUX] Session {stream.mux.mux_name} ({stream.mux.address_str}) closed by peer")
-            await self.close()
+            await stream.close()
         except Exception as e:
             if self.logger.isEnabledFor(logging.DEBUG):
                 traceback.print_exc()

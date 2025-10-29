@@ -327,6 +327,8 @@ class Socks5Server:
         self.logger.info(f'{user} is disconnected')
 
     async def close(self):
+        stack = "".join(traceback.format_stack())
+        self.logger.warning("close() called! Stack trace:\n" + stack)
         self.stop = True
         self.logger.info("Shutting down TCP server...")
         self.asyncio_server.close()
@@ -681,10 +683,38 @@ class ConnectionMethods:
 
         return 0, [protocol.bytes_sent, protocol.bytes_received]
 
+    @staticmethod
+    async def CONNECTIONS_INFO(server: Socks5Server, addr: str, port: int, user: User, cipher: Cipher,
+                            client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter
+                            ) -> Tuple[int, List[int]]:
+        server.logger.debug(f"Getting connections info for {user}...")
+
+        try:
+            remote_reader, remote_writer = await asyncio.open_connection(addr, port)
+            local_ip, local_port = remote_writer.get_extra_info("sockname")
+            reply_frames = await server.trace_event(
+                cipher.server_make_reply(server.socks_version, REPLYES_CODES['succeeded'], local_ip, local_port),
+                event_name=f'CMD_CONFIRM'
+            )
+            client_writer.write(b''.join(reply_frames))
+            await client_writer.drain()
+        except Exception as e:
+            server.logger.warning(f"Failed to connect to {addr}:{port} => {e}")
+            reply_frames = await server.trace_event(
+                cipher.server_make_reply(server.socks_version, REPLYES_CODES['host_unreachable'], '0.0.0.0', 0),
+                event_name=f'CMD_CONFIRM'
+            )
+            client_writer.write(b''.join(reply_frames))
+            await client_writer.drain()
+            return 1, [0,0]
+
+        server.logger.debug(f'{user} connected to {addr}:{port}')
+
 
 USER_COMMANDS = {
     0x00: ConnectionMethods.PING,
     0x01: ConnectionMethods.CONNECT,
     0x02: ConnectionMethods.BIND,
     0x03: ConnectionMethods.UDP_ASSOCIATE,
+    0x04: ConnectionMethods.CONNECTIONS_INFO
 }

@@ -90,7 +90,7 @@ class AES_CTR(Cipher):
         password = await reader.readexactly(plen)
         password = b''.join(self.decrypt(password)).decode()
 
-        db_pw, db_key = db_handler.get_user(username)
+        db_pw, db_key = db_handler.get_user_auth_data(username)
 
         if db_pw == password:
             writer.write(b''.join(self.encrypt(struct.pack("!BB", 1, 0))))
@@ -307,7 +307,7 @@ class AES_CBC(Cipher): # ДОДЕЛАТЬ ЭТО ДЕРЬМИЩЕ!!!!!!!!!!
         decrypted_password = b''.join(self.decrypt(await reader.readexactly(padded_plen)))
         password = decrypted_password[:plen].decode()
 
-        db_pw, db_key = db_handler.get_user(username)
+        db_pw, db_key = db_handler.get_user_auth_data(username)
 
         if db_pw == password:
             writer.write(b''.join(self.encrypt(struct.pack("!BB", 1, 0))))
@@ -545,7 +545,7 @@ class ChaCha20_Poly1305(Cipher):
         password = await reader.readexactly(plen + self.overhead_length)
         password = b''.join(self.decrypt(password)).decode()
 
-        db_pw, db_key = db_handler.get_user(username)
+        db_pw, db_key = db_handler.get_user_auth_data(username)
 
         if db_pw == password:
             writer.write(b''.join(self.encrypt(struct.pack("!BB", 1, 0))))
