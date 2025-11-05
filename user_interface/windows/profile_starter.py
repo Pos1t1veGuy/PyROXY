@@ -74,14 +74,30 @@ def get_client_version(client_path: str) -> str:
         text=True
     ).stdout.strip()
 
+def format_size(size_bytes: int, rnd: int = 0) -> Tuple[float, str]:
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_bytes < 1024:
+            return round(float(size_bytes), rnd), unit
+        size_bytes /= 1024
+    return round(float(size_bytes), rnd), 'TB'
+
+def format_size_to_unit(size_bytes: int, unit: str) -> float:
+    units = ['B', 'KB', 'MB', 'GB', 'TB']
+    if unit in units:
+        return size_bytes / 1024**units.index(unit)
+
+    raise ValueError(f'"unit" kwarg must be string, one from {units}')
+
 def download_file(url: str, dest: Optional[str] = None) -> str:
     if dest is None:
         dest = os.path.basename(url)
 
-    print('[+] Updating...')
     with rq.get(url, stream=True) as r:
         r.raise_for_status()
         total_size = int(r.headers.get('content-length', 0))
+        formated_total = format_size(total_size, rnd=2)
+        max_len = len(str(formated_total[0]))
+        unit = formated_total[1]
         downloaded = 0
 
         with open(dest, 'wb') as f:
@@ -90,8 +106,20 @@ def download_file(url: str, dest: Optional[str] = None) -> str:
                     f.write(chunk)
                     downloaded += len(chunk)
                     done = int(50 * downloaded / total_size) if total_size else 0
-                    sys.stdout.write(f'\r[+] Downloading: [{Fore.GREEN}{"█" * done}{"." * (50 - done)}] '
-                                     f'{downloaded}/{total_size} bytes{Style.RESET_ALL}')
+
+                    dlded = format_size_to_unit(downloaded, unit)
+                    main_chars = str(dlded).split('.')[0]
+                    second_chars = str(dlded).split('.')[1]
+
+                    if len(main_chars) + 1 + len(second_chars) <= max_len:
+                        formatted_dlded = str(dlded) + '0' * (max_len - len(main_chars) - 1 - len(second_chars))
+                    elif len(main_chars)+1 >= max_len:
+                        formatted_dlded = main_chars
+                    else:
+                        formatted_dlded = f'{main_chars}.{second_chars[:(max_len - len(main_chars) - 1)]}'
+
+                    sys.stdout.write(f'\r[+] Downloading: [{Fore.GREEN}{"█" * done}{"." * (50 - done)}{Style.RESET_ALL}]'
+                                     f' {formatted_dlded}/{formated_total[0]} {formated_total[1]}')
                     sys.stdout.flush()
     return dest
 
@@ -115,6 +143,7 @@ def check_updates():
         if agreement.lower() in ['y', 'yes', 'н']:
             print('[-] Cancelled by user')
         else:
+            print('Updating...')
             zip_path = download_file(win_zip_url)
             with zipfile.ZipFile(BASE_DIR / zip_path, 'r') as zip_ref:
                 zip_ref.extract(updater, BASE_DIR)
