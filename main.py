@@ -87,7 +87,7 @@ if args.execute:
             ann = inspect.getdoc(func) or ""
             print(f"  {' ' if i < 10 else ''}{i}. {name}{sig}")
             if ann:
-                print(f"    → {ann.splitlines()[0]}")
+                print(f"    -> {ann.splitlines()[0]}")
         print("\nExample usage: --execute \"is_superuser('admin')\"")
         return 0
 

@@ -42,7 +42,7 @@ class Socks5Client:
         self.sessions = []
 
     async def handshake(self, proxy_host: str = '127.0.0.1', proxy_port: int = 1080, username: Optional[str] = None,
-                        password: Optional[str] = None, proxying_mode: int = 0, logging: bool = True,
+                        password: Optional[str] = None, proxying_mode: int = 0, logging_enabled: bool = True,
                         session_class = None) -> 'TCP_ProxySession':
         reader, writer = await asyncio.open_connection(proxy_host, proxy_port)
         try:
@@ -58,8 +58,8 @@ class Socks5Client:
                                 username=username, password=password, log_bytes=self.log_bytes)
         self.sessions.append(session)
         await self.trace_event(default_cipher.client_hello(self, reader, writer), event_name='CLIENT_HELLO')
-        if logging: self.logger.debug("Sent client_hello")
-        if logging:
+        if logging_enabled: self.logger.debug("Sent client_hello")
+        if logging_enabled:
             self.logger.info(
                 f"Connected to SOCKS5 proxy at {proxy_host}:{proxy_port} using {self.ciphers[self.cipher_index].__class__.__name__}"
             )
@@ -69,7 +69,7 @@ class Socks5Client:
                     default_cipher.client_start_handshake(self, self.cipher_index, proxying_mode, reader, writer),
                     event_name='CLIENT_START_HANDSHAKE'
                 ):
-                if logging:
+                if logging_enabled:
                     self.logger.debug(f"Sent a cipher to the server {self.ciphers[self.cipher_index].__class__.__name__}")
             else:
                 raise ConnectionError(f"Server has denied choosed cipher {self.cipher_index}")
@@ -78,12 +78,12 @@ class Socks5Client:
         if username and password:
             methods.insert(0, 0x02)
 
-        if logging: self.logger.debug("Sent auth methods")
+        if logging_enabled: self.logger.debug("Sent auth methods")
         methods_msg = await default_cipher.client_send_methods(self.socks_version, methods)
 
         await self.trace_event(session.asend(methods_msg, encrypt=False, log_bytes=False),
                                event_name=f'SENDING_AUTH_MTHODS')
-        if logging: self.logger.debug("Receiving server auth method")
+        if logging_enabled: self.logger.debug("Receiving server auth method")
         method_chosen = await self.trace_event(
             default_cipher.client_get_method(self.socks_version, reader),
             event_name=f'GETTING_AUTH_METHODS'
@@ -97,30 +97,30 @@ class Socks5Client:
                 if not username or not password:
                     raise ConnectionError("Proxy requires username/password authentication, but none provided")
 
-                if logging: self.logger.debug("Client is authorizing")
+                if logging_enabled: self.logger.debug("Client is authorizing")
                 auth_ok = await self.trace_event(
                     default_cipher.client_auth_userpass(username, password, reader, writer),
                     event_name='AUTH'
                 )
                 if not auth_ok:
                     raise ConnectionError("Authentication failed")
-                if logging: self.logger.info("Authenticated successfully")
+                if logging_enabled: self.logger.info("Authenticated successfully")
 
             elif method_chosen == 0x00:
-                if logging: self.logger.info("No authentication required by proxy")
+                if logging_enabled: self.logger.info("No authentication required by proxy")
 
             else:
                 raise ConnectionError(f"Unsupported authentication method selected by proxy: {method_chosen}")
 
             if await session.cipher.client_finish_handshake(reader, writer):
-                if logging: self.logger.debug("Handshaked")
+                if logging_enabled: self.logger.debug("Handshaked")
                 session.cipher.is_handshaked = True
                 return session
             else:
                 raise ConnectionError(f'{user} refused a handshake')
         except Exception as ex:
             details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
-            if logging: self.logger.error(f'{ex}{details}')
+            if logging_enabled: self.logger.error(f'{ex}{details}')
             raise ex
 
 

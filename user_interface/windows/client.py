@@ -22,7 +22,7 @@ from pyroxy.tunnel import Tun2Socks
 from pyroxy.base_cipher import resolve_domain
 
 
-APP_VERSION = '1.0.5'
+APP_VERSION = '1.0.6'
 
 
 class ColorFormatter(logging.Formatter):

@@ -238,21 +238,43 @@ class SQLite_Handler(Handler):
             return dict(row)
         return {}
 
+    def get_users(self, usernames: List[str] = [], do: Optional[Callable[List[str], Any]] = None) -> List[dict]:
+        with sqlite3.connect(self.filepath) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
+            if usernames:
+                placeholders = ','.join(['?'] * len(usernames))
+                cursor.execute(f'SELECT * FROM users WHERE username IN ({placeholders})', usernames)
+            else:
+                cursor.execute('SELECT * FROM users')
+
+            rows = cursor.fetchall()
+            result = [dict(row) for row in rows] if rows else []
+            return do(result) if do else result
+
     def add_user(self, username: str, show_password: bool = False) -> bool:
         password = ''.join(random.choices(string.ascii_letters + string.digits, k=random.randint(8, 32)))
         if show_password:
             print('password:', password)
-        try:
-            with sqlite3.connect(self.filepath) as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "INSERT INTO users (username, password) VALUES (?, ?)",
-                    (username, password)
-                )
-                conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            pass
+        # try:
+        with sqlite3.connect(self.filepath) as conn:
+            cursor = conn.cursor()
+
+            cursor.execute('SELECT 1 FROM users WHERE username = ?', (username,))
+            one = cursor.fetchone()
+            if one:
+                print(f'[i] User {username} already exists, skipping. {one} {type(one)}')
+                return False
+
+            cursor.execute(
+                "INSERT INTO users (username, password) VALUES (?, ?)",
+                (username, password)
+            )
+            conn.commit()
+        return True
+        # except sqlite3.IntegrityError:
+        #     pass
         return False
 
     def delete_user(self, username: str) -> bool:
