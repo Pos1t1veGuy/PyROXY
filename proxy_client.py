@@ -119,7 +119,8 @@ class Socks5Client:
             else:
                 raise ConnectionError(f'{user} refused a handshake')
         except Exception as ex:
-            if logging: self.logger.error(ex)
+            details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
+            if logging: self.logger.error(f'{ex}{details}')
             raise ex
 
 
@@ -142,7 +143,8 @@ class Socks5Client:
             self.logger.debug(f"Pong from proxy")
             return address == '0.0.0.0' and port == 0
         except Exception as ex:
-            self.logger.debug(f'Ping received an error: {ex}')
+            details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
+            self.logger.debug(f'Ping received an error: "{ex}"{details}')
             return False
 
     async def connect(self, target_host: str, target_port: int,
@@ -208,7 +210,8 @@ class Socks5Client:
         except json.decoder.JSONDecodeError:
             self.logger.debug(f'Server received an invalid response')
         except Exception as ex:
-            self.logger.debug(f'Ping received an error: {ex}')
+            details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
+            self.logger.debug(f'Ping received an error: "{ex}"{details}')
         return {}
 
 
@@ -216,9 +219,8 @@ class Socks5Client:
         try:
             return await coro
         except Exception as ex:
-            if self.logger.isEnabledFor(logging.DEBUG):
-                traceback.print_exc()
-            raise ex_class(f'Error when {event_name}: "{ex}"')
+            details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
+            raise ex_class(f'Error when {event_name}: "{ex}"{details}')
 
 
     async def close(self, session: Optional['Session'] = None):
@@ -471,9 +473,11 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
         self.recv_queue.put_nowait((data, addr))
 
     def error_received(self, exc):
-        self.logger.error(f"{self} error: {exc}")
+        details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
+        self.logger.error(f"{self} error: '{exc}'{details}")
 
     def connection_lost(self, exc):
+        print(f"{self} connection with {self.client_ip}:{self.client_port} closed")
         pass # self.logger.error(f"{self} connection with {self.client_ip}:{self.client_port} closed")
 
     def raw_send(self, data: bytes):
@@ -491,6 +495,7 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
             self.transport.close()
             self.transport = None
         self.recv_queue.put_nowait((None, None))
+        print('session closed\n', *traceback.format_stack())
 
     @staticmethod
     async def create(host: str, port: int, cipher: 'Cipher', target_host: str, target_port: int) -> 'UDP_ProxySession':
@@ -538,10 +543,12 @@ class Socks5_UDP_Retranslator(UDP_ProxySession):
                 self.logger.debug(f"{self} timeout reached. Closing...")
                 self.transport.close()
                 self.stop = True
+                print('timeout close')
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]):
         self.last_activity = time.time()
         self.logger.debug(f"{self} datagram from {addr}")
+        print(f"{self} datagram from {addr}")
 
         if self.client_addr is None:
             self.client_addr = addr
@@ -562,10 +569,12 @@ class Socks5_UDP_Retranslator(UDP_ProxySession):
                 )
 
         except Exception as e:
-            self.logger.error(f"UDP relay error: {e}")
+            details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
+            self.logger.error(f"UDP relay error: '{e}'{details}")
 
     @staticmethod
     async def create(host: str, port: int, cipher: 'Cipher') -> 'Socks5_UDP_Retranslator':
+        print(f'retranslator started for {host}:{port}')
         loop = asyncio.get_running_loop()
         transport, protocol = await loop.create_datagram_endpoint(
             lambda: Socks5_UDP_Retranslator(host, port, cipher),
@@ -577,6 +586,7 @@ class Socks5_UDP_Retranslator(UDP_ProxySession):
 
     def connection_lost(self, exc):
         super().connection_lost(exc)
+        print('udp conn lost close')
         self.stop = True
 
 class Socks5_TCP_Retranslator(Socks5Client):
@@ -607,6 +617,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
         self._local_host = 'localhost'
         self._local_host = 0
+        self.closing = False
 
         self.local_server = None
 
@@ -627,6 +638,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
                 self._local_host = self.local_server.host
                 self._local_host = self.local_server.port
 
+                asyncio.create_task(self.monitor_sessions())
                 await self.local_server.start()
             else:
                 self.logger.error(f"Server is not available {self.remote_host}:{self.remote_port}")
@@ -635,6 +647,7 @@ class Socks5_TCP_Retranslator(Socks5Client):
             self.logger.info('Client closed by user')
         except RuntimeError:
             self.logger.info('Client closed by user')
+        self.closing = True
 
     def listen_and_forward(self, *args, **kwargs):
         try:
@@ -643,12 +656,25 @@ class Socks5_TCP_Retranslator(Socks5Client):
             self.logger.info('Client closed by user')
 
 
+    async def monitor_sessions(self):
+        while not self.closing:
+            try:
+                for session in self.sessions:
+                    if session.closed:
+                        self.sessions.remove(session)
+            except Exception as ex:
+                details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
+                self.logger.debug(f'"monitor_sessions" received as error: "{ex}"{details}')
+            await asyncio.sleep(1)
+
+
     async def handle_local_client(self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter):
         try:
             addr, port, command, default_cipher, user = await self.listen_local_cmd(client_reader, client_writer)
         except Exception as e:
+            details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
             self.logger.error(
-                f"Can not do handshake to local proxy {self.local_server.host}:{self.local_server.port} — {e}"
+                f"Can not do handshake to local proxy {self.local_server.host}:{self.local_server.port} - '{e}'{details}"
             )
             client_writer.close()
             await client_writer.wait_closed()
@@ -665,7 +691,8 @@ class Socks5_TCP_Retranslator(Socks5Client):
             await client_writer.wait_closed()
             return
         except Exception as e:
-            self.logger.error(f"Can not do handshake to remote proxy {self.remote_host}:{self.remote_port} - {e}")
+            details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
+            self.logger.error(f"Can not do handshake to remote proxy {self.remote_host}:{self.remote_port} - '{e}'{details}")
             try:
                 client_writer.close()
                 await client_writer.wait_closed()
@@ -678,9 +705,8 @@ class Socks5_TCP_Retranslator(Socks5Client):
             self.logger.debug(f"Connection to {addr}:{port} is closed, code: {status_code}")
             await self.close_writer(client_writer)
         except Exception as e:
-            if self.logger.isEnabledFor(logging.DEBUG):
-                traceback.print_exc()
-            self.logger.error(f"Running client cmd error {self.remote_host}:{self.remote_port} - {e}")
+            details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
+            self.logger.error(f"Running client cmd error {self.remote_host}:{self.remote_port} - '{e}'{details}")
             try:
                 client_writer.close()
                 await client_writer.wait_closed()
@@ -773,7 +799,8 @@ class Socks5_TCP_Retranslator(Socks5Client):
                 self.remote_host, port, self.udp_cipher
             )
         except Exception as e:
-            self.logger.error(f"Failed to start UDP relay: {e}")
+            details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
+            self.logger.error(f"Failed to start UDP relay: '{e}'{details}")
             reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0)
             for r in reply:
                 client_writer.write(r)
@@ -817,7 +844,8 @@ class Socks5_TCP_Retranslator(Socks5Client):
 
                     await asyncio.sleep(2)
                 except Exception as e:
-                    self.logger.warning(f"UDP_ASSOCIATE TCP connection error: {e}")
+                    details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
+                    self.logger.warning(f"UDP_ASSOCIATE TCP connection error: '{e}'{details}")
                     break
         finally:
             udp_session.close()
@@ -841,21 +869,18 @@ class Socks5_TCP_Retranslator(Socks5Client):
                 f'computer to delete this message.'
             )
             try:
-                reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'],
-                                                               '0.0.0.0', 0)
+                reply = await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0)
                 if client_writer:
                     for r in reply:
                         client_writer.write(r)
                     await client_writer.drain()
             except Exception as e:
-                if self.logger.isEnabledFor(logging.DEBUG):
-                    traceback.print_exc()
-                self.logger.error(f'Connection error: {e}')
+                details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
+                self.logger.error(f'Connection error: "{e}"{details}')
                 try:
                     if client_writer:
                         client_writer.write(
-                            await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'],
-                                                                   '0.0.0.0', 0)
+                            await default_cipher.server_make_reply(self.socks_version, REPLYES_CODES['failure'], '0.0.0.0', 0)
                         )
                         await client_writer.drain()
                 except:

@@ -142,6 +142,16 @@ def resolve_domain(domain: str, retry: bool = True) -> str:
         r = requests.get("https://cloudflare-dns.com/dns-query", headers=headers, params=params, timeout=5,
                          verify=certifi.where())
         data = json.loads(r.text)
+
+        for ans in data.get("Answer", []):
+            if ans.get("type") == 1:  # A record
+                return ans["data"]
+
+        for ans in reversed(data.get("Answer", [])):
+            if ans.get("type") == 5:  # CNAME
+                cname = ans["data"].rstrip(".")
+                return resolve_domain(cname, retry=False)
+
         return data["Answer"][0]["data"]
     except:
         if retry:

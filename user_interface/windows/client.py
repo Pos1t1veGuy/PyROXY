@@ -22,7 +22,7 @@ from pyroxy.tunnel import Tun2Socks
 from pyroxy.base_cipher import resolve_domain
 
 
-APP_VERSION = '1.0.4'
+APP_VERSION = '1.0.5'
 
 
 class ColorFormatter(logging.Formatter):
@@ -188,9 +188,11 @@ def main():
         if args.auto_forward_traffic == 1:
             print(f'[+] Auto forward enabled')
             tunnel.start(args.local_host, args.local_port)
+        else:
+            print(f'[+] Auto forward disabled, local proxy server works at {args.local_host}:{args.local_port}')
 
         CLIENT.listen_and_forward(local_host=args.local_host, local_port=args.local_port)
-    except (KeyboardInterrupt, RuntimeError):
+    except (KeyboardInterrupt, RuntimeError, asyncio.exceptions.CancelledError):
         pass
     except Exception as ex:
         if args.logging_level.lower() == "debug":

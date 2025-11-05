@@ -83,12 +83,10 @@ class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
                             else:
                                 await session.close()
 
-                await asyncio.sleep(self.mux_monitor_delay)
             except Exception as ex:
-                if self.logger.isEnabledFor(logging.DEBUG):
-                    traceback.print_exc()
-                self.logger.debug(f'monitor_mux received as error: {ex}')
-                await asyncio.sleep(self.mux_monitor_delay)
+                details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
+                self.logger.debug(f'[MUX] "monitor_mux" received as error: "{ex}"{details}')
+            await asyncio.sleep(self.mux_monitor_delay)
 
 
     async def handle_local_client(self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter):
@@ -98,8 +96,9 @@ class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
         try:
             addr, port, command, default_cipher, user = await self.listen_local_cmd(client_reader, client_writer)
         except Exception as e:
+            details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
             self.logger.error(
-                f"Can not do handshake to local proxy {self.local_server.host}:{self.local_server.port} — {e}"
+                f"[MUX] Can not do handshake to local proxy {self.local_server.host}:{self.local_server.port} - '{e}'{details}"
             )
             return
 
@@ -107,12 +106,15 @@ class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
             try:
                 mux = await self.get_strongest_session()
                 remote_stream = await mux.open_stream()
-                self.logger.debug(f'MUX Stream is opened in {mux}')
+                self.logger.debug(f'[MUX] Stream is opened in {mux}')
             except (ConnectionRefusedError, ValueError):
-                self.logger.error(f"Can not connect to remote proxy {self.remote_host}:{self.remote_port}")
+                self.logger.error(f"[MUX] Can not connect to remote proxy {self.remote_host}:{self.remote_port}")
                 return
             except Exception as e:
-                self.logger.error(f"Can not do handshake to remote proxy {self.remote_host}:{self.remote_port} — {e}")
+                details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
+                self.logger.error(
+                    f"[MUX] Can not do handshake to remote proxy {self.remote_host}:{self.remote_port} - '{e}'{details}"
+                )
                 return
 
         try:
@@ -120,9 +122,8 @@ class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
             self.logger.debug(f"Connection to {addr}:{port} is closed, code: {status_code}")
             await self.close_writer(client_writer)
         except Exception as e:
-            if self.logger.isEnabledFor(logging.DEBUG):
-                traceback.print_exc()
-            self.logger.error(f"Running client cmd error {self.remote_host}:{self.remote_port} — {e}")
+            details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
+            self.logger.error(f"[MUX] Running client cmd error {self.remote_host}:{self.remote_port} - '{e}'{details}")
             return
 
     async def open_mux_connection(self, **kwargs) -> Tuple[TCP_ProxySession, TCP_MuxSession]:
@@ -293,8 +294,7 @@ class Mux_Socks5Server(Socks5Server):
             self.logger.info(f"[MUX] Session {stream.mux.mux_name} ({stream.mux.address_str}) closed by peer")
             await stream.close()
         except Exception as e:
-            if self.logger.isEnabledFor(logging.DEBUG):
-                traceback.print_exc()
-            self.logger.error(f"[MUX] stream {stream.stream_id} error: {e}")
+            details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
+            self.logger.error(f"[MUX] stream {stream.stream_id} error: '{e}'{details}")
         finally:
             await stream.close()
