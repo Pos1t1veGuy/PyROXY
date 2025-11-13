@@ -22,8 +22,8 @@ class Socks5Server:
                  ciphers: List[Cipher] = [Cipher()],
                  udp_cipher: Optional[Cipher] = None,
                  udp_server_timeout: int = 60,
+                 max_udp_for_user: int = 20,
                  udp_server_max_alive_time: int = 0,
-                 max_udp_for_user: int = 70,
                  max_udp_payload: int = 65535,
                  db_handler: Optional['Handler'] = None,
                  user_commands: Optional[Dict[bytes, callable]] = None,
@@ -43,8 +43,8 @@ class Socks5Server:
         self.users_black_list = users_black_list
         self.log_bytes = log_bytes # only after handshake
         self.udp_server_timeout = udp_server_timeout
-        self.udp_server_max_alive_time = udp_server_max_alive_time
         self.max_udp_for_user = max_udp_for_user
+        self.udp_server_max_alive_time = udp_server_max_alive_time
         self.max_udp_payload = max_udp_payload
         self.ciphers = ciphers
         self.db_handler = db_handler
@@ -190,7 +190,6 @@ class Socks5Server:
             self.logger.error(f"Connection error: {repr(e)}{details}")
 
         finally:
-            print(user, 'disconnected, handle_connection closed')
             await user.disconnect()
 
     async def proxy_client(self, user: 'User', cipher: Cipher, proxying_mode: int,
@@ -251,11 +250,7 @@ class Socks5Server:
             buffer = bytearray()
 
             while not reader.at_eof():
-                if timeout < 0:
-                    data = reader.read(4096)
-                else:
-                    data = await asyncio.wait_for(reader.read(4096), timeout=timeout)
-
+                data = await asyncio.wait_for(reader.read(4096), timeout=timeout)
                 if not data:
                     break
                 bytes_received += len(data)
@@ -277,7 +272,7 @@ class Socks5Server:
         except (asyncio.TimeoutError, asyncio.CancelledError, asyncio.IncompleteReadError):
             pass
         except Exception as e:
-            details = f'\n{traceback.format_exc()}'# if self.logger.isEnabledFor(logging.DEBUG) else ''
+            details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
             self.logger.error(f"Proxying PIPE '{name}' error: '{repr(e)}'{details}")
         finally:
             await self.close_writer(writer)
@@ -437,7 +432,6 @@ class UDPServerProxy(asyncio.DatagramProtocol):
         self.host, self.port = transport.get_extra_info('sockname')
         self.last_activity = time.time()
         self.logger.debug(f"{self} started")
-        print(f"{self} started")
         asyncio.create_task(self.monitor_timeout())
 
     async def monitor_timeout(self):
@@ -445,19 +439,16 @@ class UDPServerProxy(asyncio.DatagramProtocol):
             await asyncio.sleep(1)
             if time.time() - self.last_activity > self.timeout:
                 self.logger.debug(f"{self} timeout reached. Closing...")
-                print(f"{self} timeout reached. Closing...")
                 self.transport.close()
                 self.stop = True
             if time.time() - self.start_time > self.max_alive_time and self.max_alive_time > 0:
                 self.logger.debug(f"{self} max alive time reached. Closing...")
-                print(f"{self} max alive time reached. Closing...")
                 self.transport.close()
                 self.stop = True
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]):
         self.last_activity = time.time()
         self.logger.debug(f"UDP packet received from {addr}")
-        print(f"UDP packet received from {addr}")
 
         try:
             if self.client_addr is None:
@@ -470,7 +461,7 @@ class UDPServerProxy(asyncio.DatagramProtocol):
                     self.handle_remote(data, addr)
 
         except Exception as ex:
-            details = f'\n{traceback.format_exc()}'# if self.logger.isEnabledFor(logging.DEBUG) else ''
+            details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
             self.logger.error(f'UDP server error, shutting down...\n"{ex}"{details}')
             self.transport.close()
 
@@ -531,17 +522,16 @@ class UDPServerProxy(asyncio.DatagramProtocol):
                     self.transport.sendto(payload, (dst_addr, dst_port))
                     self.bytes_sent += len(payload)
                 except Exception as e:
-                    details = f'\n{traceback.format_exc()}'# if self.logger.isEnabledFor(logging.DEBUG) else ''
+                    details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
                     self.logger.error(f"UDP sendto failed {dst_addr}:{dst_port}: '{e}'{details}")
 
         except Exception as e:
-            details = f'\n{traceback.format_exc()}'# if self.logger.isEnabledFor(logging.DEBUG) else ''
+            details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
             self.logger.error(f"Failed to parse client UDP packet: '{e}'{details}")
 
     def handle_remote(self, payload: bytes, addr: Tuple[str, int]):
         remote_ip, remote_port = addr
         self.logger.debug(f"Remote->Client UDP: {len(payload)} bytes from {remote_ip}:{remote_port}")
-        print(f"Remote->Client UDP: {len(payload)} bytes from {remote_ip}:{remote_port}")
 
         try:
             atyp, addr_bytes = encode_ip(remote_ip)
@@ -560,7 +550,7 @@ class UDPServerProxy(asyncio.DatagramProtocol):
                 self.transport.sendto(payload, self.client_addr)
 
         except Exception as e:
-            details = f'\n{traceback.format_exc()}'# if self.logger.isEnabledFor(logging.DEBUG) else ''
+            details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
             self.logger.error(f"Failed to build SOCKS5 UDP reply: '{e}'{details}")
 
     def error_received(self, exc):
@@ -569,7 +559,6 @@ class UDPServerProxy(asyncio.DatagramProtocol):
     def connection_lost(self, exc):
         self.stop = True
         self.logger.info(f"{self} transport closed: {exc}")
-        print(f"{self} transport closed: {exc}")
 
     def __str__(self):
         host_port = f"{self.host}:{self.port}, " if self.host and self.port else ""
@@ -662,7 +651,6 @@ class ConnectionMethods:
                             ) -> Tuple[int, List[int]]:
 
         server.logger.debug("Starting UDP server...")
-        print("Starting UDP server...")
         loop = asyncio.get_running_loop()
 
         try:
@@ -671,7 +659,7 @@ class ConnectionMethods:
                 local_addr=(server.udp_host, 0)
             )
         except Exception as e:
-            details = f'\n{traceback.format_exc()}'# if self.logger.isEnabledFor(logging.DEBUG) else ''
+            details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
             server.logger.error(f"Failed to start UDP relay: '{e}'{details}")
             reply = await server.trace_event(
                 default_cipher.server_make_reply(self.socks_version, 0xFF, '0.0.0.0', 0),
@@ -683,7 +671,6 @@ class ConnectionMethods:
 
         udp_host, udp_port = transport.get_extra_info('sockname')
         server.logger.info(f"Started UDP server for {addr}:{port} at {udp_host}:{udp_port}")
-        print(f"Started UDP server for {addr}:{port} at {udp_host}:{udp_port}")
 
         try:
             reply = await server.trace_event(
@@ -706,26 +693,22 @@ class ConnectionMethods:
             while True:
                 try:
                     if server.stop:
-                        server.logger.debug("Server stopping: closing UDP assoc")
-                        print("Server stopping: closing UDP assoc")
+                        server.logger.debug("Server stopping: closing UDP assoc.")
                         break
                     if client_reader.at_eof():
-                        server.logger.debug("TCP reader EOF: closing UDP assoc")
-                        print("TCP reader EOF: closing UDP assoc")
+                        server.logger.debug("TCP reader EOF: closing UDP assoc.")
                         break
                     if client_writer.is_closing():
-                        server.logger.debug("TCP writer closing: closing UDP assoc")
-                        print("TCP writer closing: closing UDP assoc")
+                        server.logger.debug("TCP writer closing: closing UDP assoc.")
                         break
 
                     await asyncio.sleep(1)
                 except Exception as e:
-                    details = f'\n{traceback.format_exc()}'# if self.logger.isEnabledFor(logging.DEBUG) else ''
-                    server.logger.error(f"UDP_ASSOCIATE TCP connection error: '{e}'{details}")
+                    details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
+                    server.logger.warning(f"UDP_ASSOCIATE TCP connection error: '{e}'{details}")
                     break
         finally:
             transport.close()
-            print('transport closed')
 
         return 0, [protocol.bytes_sent, protocol.bytes_received]
 
@@ -753,7 +736,6 @@ class ConnectionMethods:
         response = {}
         users = server.users.copy()
         for user in users:
-            print(user)
             response[user.username] = {
                 'ip': user.ip,
                 'is_superuser': user.is_superuser,
@@ -766,8 +748,6 @@ class ConnectionMethods:
                     response[user.username]['connections'] += 1
                     response[user.username]['ids'].append(another_user.id)
                     response[user.username]['ports'].append(another_user.port)
-
-        print(response)
 
         client_writer.write(b''.join(cipher.encrypt(json.dumps(response).encode())))
         await client_writer.drain()

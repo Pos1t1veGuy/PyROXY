@@ -19,10 +19,10 @@ from pyroxy.mux import Socks5_TCP_Mux_Retranslator
 from pyroxy.ciphers import *
 from pyroxy.wrappers import HTTP_WS_Wrapper
 from pyroxy.tunnel import Tun2Socks
-from pyroxy.base_cipher import resolve_domain
+from pyroxy.base_cipher import resolve_domain_doh
 
 
-APP_VERSION = '1.0.6'
+APP_VERSION = '1.0.9'
 
 
 class ColorFormatter(logging.Formatter):
@@ -132,7 +132,7 @@ def main():
             ipa = ipaddress.ip_address(args.host)
             remote_host = args.host
         except ValueError:
-            remote_host = resolve_domain(args.host)
+            remote_host = resolve_domain_doh(args.host)
             remote_domain = args.host
 
         if args.key == '.':
@@ -187,11 +187,12 @@ def main():
         tunnel.stop() # to delete broken routes
         if args.auto_forward_traffic == 1:
             print(f'[+] Auto forward enabled')
-            tunnel.start(args.local_host, args.local_port)
+            tunnel.start(args.local_host, args.local_port, auto_update=True)
         else:
             print(f'[+] Auto forward disabled, local proxy server works at {args.local_host}:{args.local_port}')
 
         CLIENT.listen_and_forward(local_host=args.local_host, local_port=args.local_port)
+
     except (KeyboardInterrupt, RuntimeError, asyncio.exceptions.CancelledError):
         pass
     except Exception as ex:

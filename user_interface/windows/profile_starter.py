@@ -158,7 +158,6 @@ if __name__ == '__main__':
     try:
         if not is_admin():
             raise Exception('Administrator privileges required. Press ENTER to close...')
-            sys.exit(1)
 
         if not '--update_skip' in sys.argv:
             check_updates()

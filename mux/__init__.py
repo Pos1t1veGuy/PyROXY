@@ -8,6 +8,7 @@ import time
 from .core import TCP_MuxSession, MuxStream
 from ..proxy_client import Socks5_TCP_Retranslator, TCP_ProxySession
 from ..proxy_server import Socks5Server, ConnectionMethods, User
+from ..base_cipher import REPLYES_CODES
 
 
 class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
@@ -48,20 +49,28 @@ class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
         while not self.closing:
             try:
                 ping_count = 0
-                while (await self.ping()) <= 0:
+                ping = await self.ping()
+                while ping <= 0:
+                    if self.closing:
+                        break
+
                     self.logger.error('Server is unavailable')
                     self.server_is_available = False
-                    if ping_count == 3:
+                    if ping_count >= 3:
                         async with self._mux_lock:
                             for session in self.mux_sessions:
                                 await session.close()
 
                     ping_count += 1
                     await asyncio.sleep(self.mux_monitor_delay)
+                    ping = await self.ping()
 
+                if self.closing:
+                    break
                 if ping_count:
                     self.logger.info('Server is now available')
 
+                self.logger.info(f'Average PING: {int(ping*1000)} ms')
                 self.server_is_available = True
 
                 async with self._mux_lock:
