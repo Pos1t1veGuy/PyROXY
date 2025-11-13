@@ -8,7 +8,7 @@ from logging.handlers import TimedRotatingFileHandler
 
 from pyroxy.proxy_server import Socks5Server
 from pyroxy.ciphers import *
-from pyroxy.db_handlers import SQLite_Handler
+from pyroxy.base_db_handlers import SQLite_Handler
 from pyroxy.wrappers import HTTP_WS_Wrapper, PP_HTTP_WS_Wrapper
 from pyroxy.mux import Mux_Socks5Server
 

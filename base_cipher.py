@@ -164,7 +164,7 @@ class Cipher:
 
             pw_length = (await reader.readexactly(1))[0]
             pw = (await reader.readexactly(pw_length)).decode()
-            db_pw, db_key = db_handler.get_user_auth_data(username)
+            db_pw, db_key = await db_handler.get_user_auth_data(username)
 
             if db_pw == pw:
                 writer.write(bytes([1, 0]))

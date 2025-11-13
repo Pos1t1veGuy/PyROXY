@@ -7,7 +7,11 @@ from datetime import datetime, timedelta
 from .base_cipher import Cipher
 
 
-class Handler: ...
+class Handler:
+    async def connect(self):
+        pass
+    async def close(self):
+        pass
 
 
 class SQLite_Handler(Handler):
@@ -24,7 +28,7 @@ class SQLite_Handler(Handler):
                     tariff_name TEXT,
                     bought_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     expires_at TIMESTAMP NOT NULL,
-                    FOREIGN KEY (username) REFERENCES users(username)
+                    FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
                 );
             ''')
             cursor.execute('''
@@ -39,7 +43,8 @@ class SQLite_Handler(Handler):
                 );
             ''')
 
-    def buy(self, username: str, tariff_name: str, duration_days: int, price: int) -> bool:
+
+    async def buy(self, username: str, tariff_name: str, duration_days: int, price: int) -> bool:
         with sqlite3.connect(self.filepath) as conn:
             cursor = conn.cursor()
 
@@ -80,7 +85,7 @@ class SQLite_Handler(Handler):
             conn.commit()
             return True
 
-    def pay(self, username: str, amount: int) -> bool:
+    async def pay(self, username: str, amount: int) -> bool:
         if amount <= 0:
             return False
         with sqlite3.connect(self.filepath) as conn:
@@ -94,7 +99,7 @@ class SQLite_Handler(Handler):
             conn.commit()
             return True
 
-    def is_subscriber(self, username: str) -> bool:
+    async def is_subscriber(self, username: str) -> bool:
         with sqlite3.connect(self.filepath) as conn:
             cursor = conn.cursor()
             cursor.execute('''
@@ -107,43 +112,43 @@ class SQLite_Handler(Handler):
             return result is not None
 
 
-    def save_key(self, username: str, key: str) -> bool:
+    async def save_key(self, username: str, key: str) -> bool:
         with sqlite3.connect(self.filepath) as conn:
             cursor = conn.cursor()
             cursor.execute('UPDATE users SET key = ? WHERE username = ?', (key, username))
             conn.commit()
-        return True
+            return True
 
-    def save_cipher(self, username: str, cipher: str) -> bool:
+    async def save_cipher(self, username: str, cipher: str) -> bool:
         with sqlite3.connect(self.filepath) as conn:
             cursor = conn.cursor()
             cursor.execute('UPDATE users SET cipher = ? WHERE username = ?', (cipher, username))
             conn.commit()
-        return True
+            return True
 
-    def save_password(self, username: str, password: str) -> bool:
+    async def save_password(self, username: str, password: str) -> bool:
         with sqlite3.connect(self.filepath) as conn:
             cursor = conn.cursor()
             cursor.execute('UPDATE users SET password = ? WHERE username = ?', (password, username))
             conn.commit()
-        return True
+            return True
 
 
-    def find_key(self, username: str) -> str:
+    async def find_key(self, username: str) -> str:
         with sqlite3.connect(self.filepath) as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT key FROM users WHERE username = ?', (username,))
             result = cursor.fetchone()
             return result[0] if result else ''
 
-    def find_cipher(self, username: str) -> str:
+    async def find_cipher(self, username: str) -> str:
         with sqlite3.connect(self.filepath) as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT cipher FROM users WHERE username = ?', (username,))
             result = cursor.fetchone()
             return result[0] if result else ''
 
-    def find_password(self, username: str) -> str:
+    async def find_password(self, username: str) -> str:
         with sqlite3.connect(self.filepath) as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT password FROM users WHERE username = ?', (username,))
@@ -151,14 +156,14 @@ class SQLite_Handler(Handler):
             return result[0] if result else ''
 
 
-    def get_user_balance(self, username: str) -> int:
+    async def get_user_balance(self, username: str) -> int:
         with sqlite3.connect(self.filepath) as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT balance FROM users WHERE username = ?', (username,))
             result = cursor.fetchone()
             return result[0] if result else 0
 
-    def get_access_expiry(self, username: str) -> Optional[datetime]:
+    async def get_access_expiry(self, username: str) -> Optional[datetime]:
         with sqlite3.connect(self.filepath) as conn:
             cursor = conn.cursor()
             cursor.execute('''
@@ -170,7 +175,7 @@ class SQLite_Handler(Handler):
                 return datetime.fromisoformat(result[0])
             return None
 
-    def tarif_was(self, username: str, tarif_name: str = "free_3_days") -> bool:
+    async def tarif_was(self, username: str, tarif_name: str = "free_3_days") -> bool:
         with sqlite3.connect(self.filepath) as conn:
             cursor = conn.cursor()
             cursor.execute('''
@@ -188,7 +193,7 @@ class SQLite_Handler(Handler):
             return (now - first_buy_date).days < 3
 
 
-    def set_superuser(self, username: str, value: bool) -> bool:
+    async def set_superuser(self, username: str, value: bool) -> bool:
         with sqlite3.connect(self.filepath) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -198,21 +203,22 @@ class SQLite_Handler(Handler):
             conn.commit()
             return True
 
-    def is_superuser(self, username: str) -> bool:
+    async def is_superuser(self, username: str) -> bool:
         with sqlite3.connect(self.filepath) as conn:
             cursor = conn.cursor()
             cursor.execute('SELECT is_superuser FROM users WHERE username = ?', (username,))
             row = cursor.fetchone()
             return bool(row and row[0])
 
-    def promote_user(self, username: str) -> bool:
+    async def promote_user(self, username: str) -> bool:
         return self.set_superuser(username, True)
 
-    def demote_user(self, username: str) -> bool:
+    async def demote_user(self, username: str) -> bool:
         return self.set_superuser(username, False)
 
 
-    def get_user_auth_data(self, username: str, check_subscription: bool = True) -> Tuple[Optional[str], Optional[str]]:
+    async def get_user_auth_data(self, username: str, check_subscription: bool = True
+                                 ) -> Tuple[Optional[str], Optional[str]]:
         if self.is_subscriber(username) or not check_subscription:
             with sqlite3.connect(self.filepath) as conn:
                 cursor = conn.cursor()
@@ -225,7 +231,7 @@ class SQLite_Handler(Handler):
                     return result[0], bytes.fromhex(result[1]) if result[1] else None
         return None, None
 
-    def get_user(self, username: str) -> dict:
+    async def get_user(self, username: str) -> dict:
         with sqlite3.connect(self.filepath) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
@@ -236,9 +242,8 @@ class SQLite_Handler(Handler):
                 return None
 
             return dict(row)
-        return {}
 
-    def get_users(self, usernames: List[str] = [], do: Optional[Callable[List[str], Any]] = None) -> List[dict]:
+    async def get_users(self, usernames: List[str] = [], do: Optional[Callable[List[str], Any]] = None) -> List[dict]:
         with sqlite3.connect(self.filepath) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
@@ -253,31 +258,31 @@ class SQLite_Handler(Handler):
             result = [dict(row) for row in rows] if rows else []
             return do(result) if do else result
 
-    def add_user(self, username: str, show_password: bool = False) -> bool:
+    async def add_user(self, username: str, show_password: bool = False) -> bool:
         password = ''.join(random.choices(string.ascii_letters + string.digits, k=random.randint(8, 32)))
         if show_password:
             print('password:', password)
-        # try:
-        with sqlite3.connect(self.filepath) as conn:
-            cursor = conn.cursor()
+        try:
+            with sqlite3.connect(self.filepath) as conn:
+                cursor = conn.cursor()
 
-            cursor.execute('SELECT 1 FROM users WHERE username = ?', (username,))
-            one = cursor.fetchone()
-            if one:
-                print(f'[i] User {username} already exists, skipping. {one} {type(one)}')
-                return False
+                cursor.execute('SELECT 1 FROM users WHERE username = ?', (username,))
+                one = cursor.fetchone()
+                if one:
+                    print(f'[i] User {username} already exists, skipping. {one} {type(one)}')
+                    return False
 
-            cursor.execute(
-                "INSERT INTO users (username, password) VALUES (?, ?)",
-                (username, password)
-            )
-            conn.commit()
-        return True
-        # except sqlite3.IntegrityError:
-        #     pass
+                cursor.execute(
+                    "INSERT INTO users (username, password) VALUES (?, ?)",
+                    (username, password)
+                )
+                conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            pass
         return False
 
-    def delete_user(self, username: str) -> bool:
+    async def delete_user(self, username: str) -> bool:
         with sqlite3.connect(self.filepath) as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM buys WHERE username = ?", (username,))

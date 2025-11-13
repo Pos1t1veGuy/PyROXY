@@ -162,7 +162,7 @@ class Socks5_TCP_Mux_Retranslator(Socks5_TCP_Retranslator):
             return 0
         except asyncio.TimeoutError:
             return 0
-        except (ConnectionError, ValueError, ConnectionResetError):
+        except (ConnectionError, ValueError, ConnectionResetError, OSError):
             return 0
         finally:
             if remote_stream:
