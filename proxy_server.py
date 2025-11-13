@@ -9,7 +9,8 @@ import traceback
 import json
 
 from .logger_setup import *
-from .base_cipher import Cipher, REPLYES_CODES, get_address, resolve_domain, encode_ip
+from .base_cipher import Cipher, REPLYES_CODES
+from .utils import get_address, resolve_domain, encode_ip
 from .db_handlers import SQLite_Handler
 
 
@@ -22,7 +23,7 @@ class Socks5Server:
                  ciphers: List[Cipher] = [Cipher()],
                  udp_cipher: Optional[Cipher] = None,
                  udp_server_timeout: int = 60,
-                 max_udp_for_user: int = 20,
+                 max_udp_for_user: int = 70,
                  udp_server_max_alive_time: int = 0,
                  max_udp_payload: int = 65535,
                  db_handler: Optional['Handler'] = None,

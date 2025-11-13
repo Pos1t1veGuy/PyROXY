@@ -9,7 +9,7 @@ import time
 import json
 
 from .logger_setup import *
-from .base_cipher import Cipher, REPLYES_CODES, get_address
+from .base_cipher import Cipher, REPLYES_CODES
 from .proxy_server import Socks5Server, ConnectionMethods, UDPServerProxy
 
 

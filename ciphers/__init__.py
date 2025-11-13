@@ -13,7 +13,8 @@ from Cryptodome.Util import Counter
 from Cryptodome.Util.Padding import pad, unpad
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
-from ..base_cipher import Cipher, REPLYES, get_address
+from ..base_cipher import Cipher, REPLYES
+from ..utils import get_address
 
 
 class AES_CTR(Cipher):

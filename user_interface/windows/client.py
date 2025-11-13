@@ -19,10 +19,10 @@ from pyroxy.mux import Socks5_TCP_Mux_Retranslator
 from pyroxy.ciphers import *
 from pyroxy.wrappers import HTTP_WS_Wrapper
 from pyroxy.tunnel import Tun2Socks
-from pyroxy.base_cipher import resolve_domain_doh
+from pyroxy.utils import resolve_domain_doh
 
 
-APP_VERSION = '1.0.9'
+APP_VERSION = '1.1.0'
 
 
 class ColorFormatter(logging.Formatter):

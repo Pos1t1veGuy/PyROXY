@@ -17,7 +17,7 @@ from pathlib import Path
 from colorama import init, Fore, Style, init
 init()
 
-from ..base_cipher import resolve_domain_doh
+from ..utils import resolve_domain_doh
 
 
 class Tun2Socks:
