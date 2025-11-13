@@ -194,7 +194,7 @@ class Socks5Client:
         try:
             self.logger.debug(f"Getting info from proxy")
             session = await self.handshake(proxy_host=proxy_host, proxy_port=proxy_port,
-                                           username=username, password=password, logging=False)
+                                           username=username, password=password, logging_enabled=False)
 
             cmd_bytes = await session.cipher.client_command(self.socks_version, self.user_commands['info'], '0.0.0.0', 0)
             await self.trace_event(session.asend(cmd_bytes, encrypt=False, log_bytes=False),
@@ -211,7 +211,7 @@ class Socks5Client:
             self.logger.debug(f'Server received an invalid response')
         except Exception as ex:
             details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
-            self.logger.debug(f'Ping received an error: "{ex}"{details}')
+            self.logger.debug(f'connections_info received an error: "{ex}"{details}')
         return {}
 
 
@@ -473,12 +473,11 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
         self.recv_queue.put_nowait((data, addr))
 
     def error_received(self, exc):
-        details = f'\n{traceback.format_exc()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
+        details = f'\n{traceback.format_stack()}' if self.logger.isEnabledFor(logging.DEBUG) else ''
         self.logger.error(f"{self} error: '{exc}'{details}")
 
     def connection_lost(self, exc):
-        print(f"{self} connection with {self.client_ip}:{self.client_port} closed")
-        pass # self.logger.error(f"{self} connection with {self.client_ip}:{self.client_port} closed")
+        pass # self.logger.error(f"{self} connection with {self.client_ip}:{self.client_port} closed {exc}")
 
     def raw_send(self, data: bytes):
         if self.transport is not None:
@@ -495,7 +494,6 @@ class UDP_ProxySession(asyncio.DatagramProtocol):
             self.transport.close()
             self.transport = None
         self.recv_queue.put_nowait((None, None))
-        print('session closed\n', *traceback.format_stack())
 
     @staticmethod
     async def create(host: str, port: int, cipher: 'Cipher', target_host: str, target_port: int) -> 'UDP_ProxySession':
@@ -541,14 +539,13 @@ class Socks5_UDP_Retranslator(UDP_ProxySession):
             await asyncio.sleep(1)
             if time.time() - self.last_activity > self.timeout:
                 self.logger.debug(f"{self} timeout reached. Closing...")
-                self.transport.close()
+                if self.transport:
+                    self.transport.close()
                 self.stop = True
-                print('timeout close')
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]):
         self.last_activity = time.time()
         self.logger.debug(f"{self} datagram from {addr}")
-        print(f"{self} datagram from {addr}")
 
         if self.client_addr is None:
             self.client_addr = addr
@@ -574,7 +571,6 @@ class Socks5_UDP_Retranslator(UDP_ProxySession):
 
     @staticmethod
     async def create(host: str, port: int, cipher: 'Cipher') -> 'Socks5_UDP_Retranslator':
-        print(f'retranslator started for {host}:{port}')
         loop = asyncio.get_running_loop()
         transport, protocol = await loop.create_datagram_endpoint(
             lambda: Socks5_UDP_Retranslator(host, port, cipher),
@@ -586,7 +582,6 @@ class Socks5_UDP_Retranslator(UDP_ProxySession):
 
     def connection_lost(self, exc):
         super().connection_lost(exc)
-        print('udp conn lost close')
         self.stop = True
 
 class Socks5_TCP_Retranslator(Socks5Client):
@@ -829,17 +824,10 @@ class Socks5_TCP_Retranslator(Socks5Client):
             while True:
                 try:
                     if self.local_server.stop:
-                        self.logger.debug("Server stopping: closing UDP assoc.")
+                        server.logger.debug("Retranslator stopping: closing UDP assoc")
                         break
-                    if not user.connected:
-                        self.logger.debug("User disconnected: closing UDP assoc.")
-                        break
-
                     if client_reader.at_eof():
-                        self.logger.debug("TCP reader EOF: closing UDP assoc.")
-                        break
-                    if client_writer.is_closing():
-                        self.logger.debug("TCP writer closing: closing UDP assoc.")
+                        self.logger.debug("TCP reader EOF: closing UDP assoc")
                         break
 
                     await asyncio.sleep(2)

@@ -57,4 +57,4 @@ sudo bash -c "cat > /etc/cron.d/certbot-renew <<CRON
 CRON"
 
 sudo update-alternatives --config python3
-echo "[✓] HTTPS setup complete!"
+echo "[+] HTTPS setup complete!"

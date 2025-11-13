@@ -11,11 +11,13 @@ import socket
 import psutil
 import asyncio
 import platform
+import threading as th
+import concurrent.futures
 from pathlib import Path
 from colorama import init, Fore, Style, init
 init()
 
-from ..base_cipher import resolve_domain
+from ..base_cipher import resolve_domain_doh
 
 
 class Tun2Socks:
@@ -40,6 +42,7 @@ class Tun2Socks:
         self.socks_ext = socks_ext
         self.silent = silent
         self.white_list = white_list
+        self.domain_ip_dict: Dict[str, str] = {}
 
     def tun_started(self) -> bool:
         interfaces = self.get_interfaces()
@@ -90,7 +93,10 @@ class Tun2Socks:
 class Tun2Socks_Windows(Tun2Socks):
     gateway_ip = None
     def_iface_id = None
+    iface_id = None
     tun_proc = None
+    updater_threads: List[th.Thread] = []
+    bad_routes: List[str] = []
 
     def get_interfaces(self) -> dict:
         out = subprocess.check_output("netsh interface ipv4 show interfaces",
@@ -103,7 +109,7 @@ class Tun2Socks_Windows(Tun2Socks):
                 interfaces[name.strip()] = {"idx": int(idx), "metric": int(metric)}
         return interfaces
 
-    def get_interface_index_by_gateway(self, gateway_ip: str) -> Optional[list]:
+    def get_interface_index_by_gateway(self, gateway_ip: str) -> Optional[List[int]]:
         ps_command = f"""
         Get-NetRoute -DestinationPrefix "0.0.0.0/0" |
         Where-Object {{ $_.NextHop -eq '{gateway_ip}' }} |
@@ -129,8 +135,77 @@ class Tun2Socks_Windows(Tun2Socks):
         except json.JSONDecodeError:
             return None
 
+    def add_route(self, ip: str, gataway_ip: str, interface_id: int, mask: str = '255.255.255.255'):
+        self.cmd_run(f'route add {ip} mask {mask} {gataway_ip} metric 1 if {interface_id}')
+    def delete_route(self, ip: str, gataway_ip: str, interface_id: int, mask: str = '255.255.255.255'):
+        self.cmd_run(f'route delete {ip} mask {mask} {gataway_ip} metric 1 if {interface_id}')
 
-    def start(self, socks_local: str = '127.0.0.1', socks_local_port: int = 1080, resolver_urls: List[str] = []):
+    def get_ip_by_domain(self, domain_or_ip: str, return_ttl: bool = False) -> Tuple[Optional[str], Optional[str]]:
+        if re.match(r'^\d+\.\d+\.\d+\.\d+$', domain_or_ip):  # IPv4
+            return domain_or_ip, domain_or_ip
+        else:  # domain
+            try:
+                return domain_or_ip, *resolve_domain_doh(domain_or_ip, return_ttl=return_ttl)
+            except socket.gaierror:
+                pass
+        return None, None
+
+    def update_routes(self, white_list: List[str], auto_update: bool = False):
+        resolved_domains = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(20, len(white_list))) as executor:
+            futures = [
+                executor.submit(self.get_ip_by_domain, host, return_ttl=auto_update)
+                for host in white_list
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    resolved_domains.append(future.result())
+                except Exception as e:
+                    resolved_domains.append((None, None, None))
+                    print(f'{Fore.RED}[!] Failed to resolve domain: "{e}"{Style.RESET_ALL}')
+
+        for i, host in enumerate(white_list):
+            domain, ip, ttl = resolved_domains[i]
+            if domain and ip:
+                old_ip = self.domain_ip_dict.get(host)
+                if old_ip != ip:
+                    if old_ip:
+                        self.delete_route(old_ip, self.interface_ip, self.iface_id)
+                    self.add_route(ip, self.interface_ip, self.iface_id)
+                    self.domain_ip_dict[domain] = ip
+                    if host in self.bad_routes:
+                        self.bad_routes.remove(host)
+
+                    if auto_update:
+                        thread = th.Thread(target=self.domain_auto_resolver, args=(domain, old_ip, ttl), daemon=True)
+                        self.updater_threads.append(thread)
+                        thread.start()
+                    print(f'[+] {"Rerouted" if old_ip else "Routed"} "{host}" ({ip}) via tunnel')
+
+            elif not host in self.bad_routes:
+                print(f'{Fore.RED}[!] Failed to route "{host}": {e}{Style.RESET_ALL}')
+                self.bad_routes.append(host)
+
+    def domain_auto_resolver(self, domain: str, old_ip: str, ttl: int):
+        while True:
+            try:
+                time.sleep(max(ttl - 5, 5))
+                domain, ip, ttl = self.get_ip_by_domain(domain, return_ttl=True)
+                if old_ip:
+                    self.delete_route(old_ip, self.interface_ip, self.iface_id)
+                self.add_route(ip, self.interface_ip, self.iface_id)
+                print(f'[+] {"Rerouted" if old_ip else "Routed"} "{domain}" ({ip}) via tunnel')
+                self.domain_ip_dict[domain] = ip
+                if domain in self.bad_routes:
+                    self.bad_routes.remove(domain)
+                old_ip = ip
+            except Exception as e:
+                print(f'{Fore.RED}[!] Auto resolver error for "{domain}": {e}{Style.RESET_ALL}')
+                time.sleep(60)
+
+
+    def start(self, socks_local: str = '127.0.0.1', socks_local_port: int = 1080, resolver_urls: List[str] = [],
+              auto_update: bool = False):
         if self.tun_proc: return
 
         if self.tun_started():
@@ -162,7 +237,7 @@ class Tun2Socks_Windows(Tun2Socks):
             print(f'{Fore.RED}[e] can not find LAN gateway id by IP {self.gateway_ip}{Style.RESET_ALL}')
             sys.exit(1)
 
-        self.cmd_run(f'route add {self.socks_ext} mask 255.255.255.255 {self.gateway_ip} metric 1 if {self.def_iface_id}')
+        self.add_route(self.socks_ext, self.gateway_ip, self.def_iface_id)
         self.interface_ip, self.interface_mask = self.find_free_ip(self.interface_ip, self.interface_mask)
 
         self.cmd_run(
@@ -172,41 +247,24 @@ class Tun2Socks_Windows(Tun2Socks):
 
         interfaces = self.get_interfaces()
         try:
-            iface_id = interfaces[self.tun_name]["idx"]
+            self.iface_id = interfaces[self.tun_name]["idx"]
         except KeyError:
             print(f'{Fore.RED}[e] tun2socks "{self.tun_name}" interface not found{Style.RESET_ALL}')
             sys.exit(1)
 
         if self.white_list in ([], ['']):
-            self.cmd_run(f'route add 0.0.0.0 mask 0.0.0.0 {self.interface_ip} metric 1 if {iface_id}')
+            self.add_route('0.0.0.0', self.interface_ip, self.iface_id, mask='0.0.0.0')
             print(f'[+] Routed all ips via tun2socks tunnel')
         else:
-            for host in self.white_list:
-                try:
-                    if re.match(r'^\d+\.\d+\.\d+\.\d+$', host):
-                        ips = [host]
-                    else:
-                        try:
-                            ip = resolve_domain(host)
-                            self.cmd_run(f'route add {ip} mask 255.255.255.255 {self.interface_ip} metric 1 if {iface_id}')
-                            print(f'[+] Routed "{host}" ({ip}) via tunnel')
-                        except socket.gaierror:
-                            print(f'{Fore.RED}[!] Failed to route "{host}": {e}{Style.RESET_ALL}')
-                except Exception as e:
-                    print(f'{Fore.RED}[!] Failed to route "{host}": {e}{Style.RESET_ALL}')
-
+            self.update_routes(self.white_list, auto_update=auto_update)
 
     def stop(self):
-        try:
-            interfaces = self.get_interfaces()
-            iface_id = interfaces[self.tun_name]["idx"]
-            self.cmd_run(f'route delete 0.0.0.0 mask 0.0.0.0 if {iface_id}')
-        except KeyError:
-            pass
-
-        self.cmd_run(
-            f'route delete {self.socks_ext} mask 255.255.255.255 {self.gateway_ip} metric 1 if {self.def_iface_id}'
-        )
+        if self.white_list in ([], ['']):
+            self.delete_route('0.0.0.0', self.interface_ip, self.iface_id, mask='0.0.0.0')
+        else:
+            for ip in self.domain_ip_dict.values():
+                self.delete_route(ip, self.interface_ip, self.iface_id)
+        self.delete_route(self.socks_ext, self.gateway_ip, self.def_iface_id)
 
         if not self.tun_proc: return
 
@@ -313,7 +371,7 @@ class Tun2Socks_Linux(Tun2Socks):
             if re.match(r'^\d+\.\d+\.\d+\.\d+$', self.socks_ext):
                 server_ip = self.socks_ext
             else:
-                server_ip = resolve_domain(self.socks_ext)
+                server_ip = resolve_domain_doh(self.socks_ext)
 
             res = self.cmd_run(f"ip route add {server_ip}/32 via {self.gateway_ip} dev {self.def_iface_name}")
         except Exception as e:
@@ -338,7 +396,7 @@ class Tun2Socks_Linux(Tun2Socks):
                     if re.match(r'^\d+\.\d+\.\d+\.\d+$', host):
                         ips = [host]
                     else:
-                        ips = [resolve_domain(host)]
+                        ips = [resolve_domain_doh(host)]
                     for ip in ips:
                         try:
                             self.cmd_run(f"ip route add {ip}/32 dev {self.tun_name} metric 1")
@@ -364,7 +422,7 @@ class Tun2Socks_Linux(Tun2Socks):
             if re.match(r'^\d+\.\d+\.\d+\.\d+$', self.socks_ext):
                 server_ip = self.socks_ext
             else:
-                server_ip = resolve_domain(self.socks_ext)
+                server_ip = resolve_domain_doh(self.socks_ext)
             if self.gateway_ip and self.def_iface_name:
                 self.cmd_run(f"ip route del {server_ip}/32 via {self.gateway_ip} dev {self.def_iface_name}")
         except:
@@ -376,7 +434,7 @@ class Tun2Socks_Linux(Tun2Socks):
                     if re.match(r'^\d+\.\d+\.\d+\.\d+$', host):
                         ips = [host]
                     else:
-                        ips = [resolve_domain(host)]
+                        ips = [resolve_domain_doh(host)]
                     for ip in ips:
                         self.cmd_run(f"ip route del {ip}/32 dev {self.tun_name}")
                 except:
