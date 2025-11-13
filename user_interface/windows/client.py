@@ -139,6 +139,10 @@ def main():
             remote_host = resolve_domain_doh(args.host)
             remote_domain = args.host
 
+        tunnel = Tun2Socks(remote_host, white_list=white_list, black_list=black_list, path_to_exe=args.tun2socks_path,
+                           silent=not bool(args.tunnel_debug))
+        tunnel.stop()  # to delete broken routes
+
         if args.key == '.':
             print(f'{Fore.RED}[e] You need to input your KEY into "--key=..."{Style.RESET_ALL}')
             sys.exit(1)
@@ -188,14 +192,10 @@ def main():
             retranslator_task = asyncio.create_task(
                 CLIENT.async_listen_and_forward(local_host=args.local_host, local_port=args.local_port)
             )
-
-            tunnel = Tun2Socks(remote_host, white_list=white_list, black_list=black_list, path_to_exe=args.tun2socks_path,
-                               silent=not bool(args.tunnel_debug))
-
-            tunnel.stop() # to delete broken routes
             if args.auto_forward_traffic == 1:
                 print(f'[+] Auto forward enabled')
                 tunnel.start(args.local_host, args.local_port, auto_update=True)
+                print(f'[+] Tunnel started')
             else:
                 print(f'[+] Auto forward disabled, local proxy server works at {args.local_host}:{args.local_port}')
 
