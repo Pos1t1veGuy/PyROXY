@@ -68,6 +68,18 @@ def make_loggers(filename: str):
     console_handler.setFormatter(console_formatter)
     return file_handler, console_handler
 
+def read_list_file(filepath: str, comment: str = '# Put a domains or an IPs here') -> List[str]:
+    if os.path.isfile(filepath):
+        try:
+            return [
+                element for element in open(filepath, 'r').read().split('\n')
+                if (not element.startswith('#')) and (not element.startswith(' #')) and (not element in ['', ' '])
+            ]
+        except Exception as ex:
+            print(f'{Fore.RED}[e] Error when open white list file: {ex}{Style.RESET_ALL}')
+    else:
+        open(filepath, 'w').write(comment)
+
 
 def main():
     tunnel = None
@@ -96,7 +108,8 @@ def main():
     parser.add_argument("--local_host", default='127.0.0.1', help="Local client (retranslator) host")
     parser.add_argument("--local_port", type=int, default=1080, help="Local client (retranslator) port")
 
-    parser.add_argument("--white_list_file", default='white_list.txt', help="List of domens or ips thats needs to proxy")
+    parser.add_argument("--white_list_file", default='white_list.txt', help="List of domains or ips thats needs to proxy")
+    parser.add_argument("--black_list_file", default='black_list.txt', help="List of domains or ips thats needs to ignore")
     parser.add_argument("--log_file", type=int, choices=[1, 0], default=0, help="Enable logger file (0 - false, 1 - true)")
     parser.add_argument("--tunnel_debug", type=int, choices=[1, 0], default=0, help="Enable tunnel log (0 - false, 1 - true)")
     parser.add_argument("--logging_level", choices=logging_levels, default='info', help="Application logging level")
@@ -115,17 +128,8 @@ def main():
     args = parser.parse_args()
 
     try:
-        white_list = []
-        if os.path.isfile(args.white_list_file):
-            try:
-                white_list = [
-                    domain for domain in open(args.white_list_file, 'r').read().split('\n')
-                    if (not domain.startswith('#')) and (not domain.startswith(' #')) and (not domain in ['', ' '])
-                ]
-            except Exception as ex:
-                print(f'{Fore.RED}[e] Error when open white list file: {ex}{Style.RESET_ALL}')
-        else:
-            open(args.white_list_file, 'w').write('# Put a domains or an IPs here')
+        white_list = read_list_file(args.white_list_file)
+        black_list = read_list_file(args.black_list_file)
 
         remote_domain = ''
         try:
@@ -181,7 +185,7 @@ def main():
             CLIENT.logger.addHandler(file_log)
         CLIENT.logger.propagate = False
 
-        tunnel = Tun2Socks(remote_host, white_list=white_list, path_to_exe=args.tun2socks_path,
+        tunnel = Tun2Socks(remote_host, white_list=white_list, black_list=black_list, path_to_exe=args.tun2socks_path,
                            silent=not bool(args.tunnel_debug))
 
         tunnel.stop() # to delete broken routes

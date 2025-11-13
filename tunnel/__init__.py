@@ -13,6 +13,7 @@ import asyncio
 import platform
 import threading as th
 import concurrent.futures
+import traceback
 from pathlib import Path
 from colorama import init, Fore, Style, init
 init()
@@ -31,7 +32,8 @@ class Tun2Socks:
         return object.__new__(cls)
 
     def __init__(self, socks_ext: str, tun_name: str = "wintun", interface_ip: str = '10.0.0.1', white_list: List[str] = [],
-                 path_to_exe: Optional[str] = None, interface_mask: str = '255.255.255.255', silent: bool = True):
+                 black_list: List[str] = [], path_to_exe: Optional[str] = None, interface_mask: str = '255.255.255.255',
+                 silent: bool = True):
         if platform.system().lower() == "windows":
             self.path_to_exe = Path(path_to_exe) if path_to_exe else Path(__file__).parent / "tun2socks.exe"
         else:
@@ -42,7 +44,13 @@ class Tun2Socks:
         self.socks_ext = socks_ext
         self.silent = silent
         self.white_list = white_list
-        self.domain_ip_dict: Dict[str, str] = {}
+        self.black_list = black_list
+        self.domain_ip_white_dict: Dict[str, str] = {}
+        self.domain_ip_black_dict: Dict[str, str] = {}
+
+        for black_addr in self.black_list:
+            if black_addr in self.white_list:
+                self.white_list.remove(black_addr)
 
     def tun_started(self) -> bool:
         interfaces = self.get_interfaces()
@@ -135,8 +143,8 @@ class Tun2Socks_Windows(Tun2Socks):
         except json.JSONDecodeError:
             return None
 
-    def add_route(self, ip: str, gataway_ip: str, interface_id: int, mask: str = '255.255.255.255'):
-        self.cmd_run(f'route add {ip} mask {mask} {gataway_ip} metric 1 if {interface_id}')
+    def add_route(self, ip: str, gataway_ip: str, interface_id: int, mask: str = '255.255.255.255', metric: int = 1):
+        self.cmd_run(f'route add {ip} mask {mask} {gataway_ip} metric {metric} if {interface_id}')
     def delete_route(self, ip: str, gataway_ip: str, interface_id: int, mask: str = '255.255.255.255'):
         self.cmd_run(f'route delete {ip} mask {mask} {gataway_ip} metric 1 if {interface_id}')
 
@@ -150,55 +158,66 @@ class Tun2Socks_Windows(Tun2Socks):
                 pass
         return None, None
 
-    def update_routes(self, white_list: List[str], auto_update: bool = False):
-        resolved_domains = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(20, len(white_list))) as executor:
-            futures = [
-                executor.submit(self.get_ip_by_domain, host, return_ttl=auto_update)
-                for host in white_list
-            ]
+    def thread_domain_resolve(self, domain_list: List[str], return_ttl: bool = False) -> List[Tuple[Optional[str]]]:
+        resolved_domains = [None] * len(domain_list)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(20, len(domain_list))) as executor:
+            futures = {
+                executor.submit(self.get_ip_by_domain, host, return_ttl=return_ttl): i
+                for i, host in enumerate(domain_list)
+            }
             for future in concurrent.futures.as_completed(futures):
+                idx = futures[future]
                 try:
-                    resolved_domains.append(future.result())
+                    resolved_domains[idx] = future.result()
                 except Exception as e:
-                    resolved_domains.append((None, None, None))
-                    print(f'{Fore.RED}[!] Failed to resolve domain: "{e}"{Style.RESET_ALL}')
+                    resolved_domains[idx] = (None, None)
+                    print(f'{Fore.RED}[!] Failed to resolve domain "{domain_list[idx]}": {e}{Style.RESET_ALL}')
 
-        for i, host in enumerate(white_list):
-            domain, ip, ttl = resolved_domains[i]
+        return resolved_domains
+
+    def update_routes(self, domain_list: List[str], ips_dict: Dict[str, str], interface_ip: str, interface_id: int,
+                      auto_update: bool = False, metric: int = 1, mode: str = 'via'):
+        ips_list = self.thread_domain_resolve(domain_list, return_ttl=auto_update) if domain_list else []
+
+        for i, host in enumerate(domain_list):
+            domain, ip, ttl = ips_list[i]
             if domain and ip:
-                old_ip = self.domain_ip_dict.get(host)
+                old_ip = ips_dict.get(host)
                 if old_ip != ip:
                     if old_ip:
-                        self.delete_route(old_ip, self.interface_ip, self.iface_id)
-                    self.add_route(ip, self.interface_ip, self.iface_id)
-                    self.domain_ip_dict[domain] = ip
+                        self.delete_route(old_ip, interface_ip, interface_id)
+                    self.add_route(ip, interface_ip, interface_id, metric=metric)
+                    ips_dict[domain] = ip
+
                     if host in self.bad_routes:
                         self.bad_routes.remove(host)
-
                     if auto_update:
-                        thread = th.Thread(target=self.domain_auto_resolver, args=(domain, old_ip, ttl), daemon=True)
+                        thread = th.Thread(target=self.domain_auto_resolver, args=(
+                            domain, old_ip, ttl, ips_dict, interface_ip, interface_id
+                        ), kwargs={'metric': metric}, daemon=True)
                         self.updater_threads.append(thread)
                         thread.start()
-                    print(f'[+] {"Rerouted" if old_ip else "Routed"} "{host}" ({ip}) via tunnel')
+                    print(f'[+] {"Rerouted" if old_ip else "Routed"} "{host}" ({ip}) {mode} tunnel')
 
             elif not host in self.bad_routes:
                 print(f'{Fore.RED}[!] Failed to route "{host}": {e}{Style.RESET_ALL}')
                 self.bad_routes.append(host)
 
-    def domain_auto_resolver(self, domain: str, old_ip: str, ttl: int):
+    def domain_auto_resolver(self, domain: str, old_ip: str, ttl: int, ips_dict: Dict[str, str], interface_ip: str,
+                             interface_id: int, metric: int = 1):
         while True:
             try:
                 time.sleep(max(ttl - 5, 5))
                 domain, ip, ttl = self.get_ip_by_domain(domain, return_ttl=True)
                 if old_ip:
-                    self.delete_route(old_ip, self.interface_ip, self.iface_id)
-                self.add_route(ip, self.interface_ip, self.iface_id)
-                print(f'[+] {"Rerouted" if old_ip else "Routed"} "{domain}" ({ip}) via tunnel')
-                self.domain_ip_dict[domain] = ip
+                    self.delete_route(old_ip, interface_ip, interface_id)
+                self.add_route(ip, interface_ip, interface_id, metric=metric)
+                ips_dict[domain] = ip
+
                 if domain in self.bad_routes:
                     self.bad_routes.remove(domain)
                 old_ip = ip
+                print(f'[+] {"Rerouted" if old_ip else "Routed"} "{domain}" ({ip}) via tunnel')
             except Exception as e:
                 print(f'{Fore.RED}[!] Auto resolver error for "{domain}": {e}{Style.RESET_ALL}')
                 time.sleep(60)
@@ -253,18 +272,24 @@ class Tun2Socks_Windows(Tun2Socks):
             sys.exit(1)
 
         if self.white_list in ([], ['']):
+            if not self.black_list in ([], ['']):
+                self.update_routes(self.black_list, self.domain_ip_black_dict, self.gateway_ip, self.def_iface_id,
+                                   auto_update=auto_update, mode='out of')
             self.add_route('0.0.0.0', self.interface_ip, self.iface_id, mask='0.0.0.0')
             print(f'[+] Routed all ips via tun2socks tunnel')
         else:
-            self.update_routes(self.white_list, auto_update=auto_update)
+            self.update_routes(self.white_list, self.domain_ip_white_dict, self.interface_ip, self.iface_id,
+                               auto_update=auto_update)
 
     def stop(self):
         if self.white_list in ([], ['']):
             self.delete_route('0.0.0.0', self.interface_ip, self.iface_id, mask='0.0.0.0')
         else:
-            for ip in self.domain_ip_dict.values():
+            for ip in self.domain_ip_white_dict.values():
                 self.delete_route(ip, self.interface_ip, self.iface_id)
         self.delete_route(self.socks_ext, self.gateway_ip, self.def_iface_id)
+        for ip in self.domain_ip_black_dict.values():
+            self.delete_route(ip, self.gateway_ip, self.def_iface_id)
 
         if not self.tun_proc: return
 
