@@ -11,7 +11,7 @@ import json
 from .logger_setup import *
 from .base_cipher import Cipher, REPLYES_CODES
 from .utils import get_address, resolve_domain, encode_ip
-from .db_handlers import SQLite_Handler
+from .base_db_handlers import SQLite_Handler
 
 
 
@@ -91,10 +91,14 @@ class Socks5Server:
 
             ciphers = f'{len(self.ciphers)} ciphers' if len(self.ciphers) > 1 else self.ciphers[0].__class__.__name__
             self.logger.info(f"SOCKS5 proxy running on {self.host}:{self.port} using {ciphers}")
+            if self.db_handler:
+                await self.db_handler.connect()
             async with self.asyncio_server:
                 await self.asyncio_server.serve_forever()
         except KeyboardInterrupt:
             self.logger.info("Server is closed")
+        if self.db_handler:
+            await self.db_handler.close()
 
 
     async def trace_event(self, coro: Awaitable, event_name: str, ex_class: Exception = ConnectionError):
@@ -131,7 +135,7 @@ class Socks5Server:
                                                event_name=f'AUTH')
 
             user.username, user.password, user.key = auth_data
-            user.is_superuser = self.db_handler.is_superuser(user.username)
+            user.is_superuser = await self.db_handler.is_superuser(user.username)
         else:
             data = await default_cipher.server_send_method_to_user(self.socks_version, 0xFF)
             await self.trace_event(self.send(user, data, log_bytes=False), event_name=f'SEND_AUTH_METHOD')

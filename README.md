@@ -127,7 +127,7 @@ default_key=...
 Put the server hosting IP in host=,
 Put `default_server_key` default_key=,
 cipher must be one of the available on the server (`chacha20`/`aes_ctr`/`none`/`default` by default provided),
-username and password must be registered in base using database handler from [db_handlers.py](db_handlers.py)
+username and password must be registered in base using database handler from [db_handlers.py](base_db_handlers.py)
 (telegram bot do it automaticaly)
 
 ## License

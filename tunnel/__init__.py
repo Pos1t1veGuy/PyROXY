@@ -52,6 +52,11 @@ class Tun2Socks:
             if black_addr in self.white_list:
                 self.white_list.remove(black_addr)
 
+        if socks_ext in black_list:
+            self.black_list.remove(black_addr)
+        if socks_ext in white_list:
+            self.white_list.remove(black_addr)
+
     def tun_started(self) -> bool:
         interfaces = self.get_interfaces()
         return interfaces.get(self.tun_name) != None
@@ -150,7 +155,10 @@ class Tun2Socks_Windows(Tun2Socks):
 
     def get_ip_by_domain(self, domain_or_ip: str, return_ttl: bool = False) -> Tuple[Optional[str], Optional[str]]:
         if re.match(r'^\d+\.\d+\.\d+\.\d+$', domain_or_ip):  # IPv4
-            return domain_or_ip, domain_or_ip
+            if return_ttl:
+                return domain_or_ip, domain_or_ip, 0
+            else:
+                return domain_or_ip, domain_or_ip
         else:  # domain
             try:
                 return domain_or_ip, *resolve_domain_doh(domain_or_ip, return_ttl=return_ttl)
@@ -182,6 +190,10 @@ class Tun2Socks_Windows(Tun2Socks):
         for i, host in enumerate(domain_list):
             domain, ip, ttl = ips_list[i]
             if domain and ip:
+                if domain == ip:
+                    ips_dict[domain] = ip
+                    continue
+
                 old_ip = ips_dict.get(host)
                 if old_ip != ip:
                     if old_ip:
